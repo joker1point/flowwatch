@@ -106,8 +106,8 @@ device=\Device\NPF_{4FC5DA1D-...}  端点表 6299 个（刷新 203 ms）
    `10.44.79.68:137 → 10.44.255.255:137`、`10.44.191.174:52010 → 10.44.255.255:5684` 这类
    同网段邻居的 NetBIOS/多播广播 —— 它们既不该算本机流量，也不该算本机"归因失败"。
    改成 `promisc=0` + **本机地址白名单**（接口地址集合，随端点表一起刷新，VPN 重连也能跟上）。
-2. **"未归因"不是一件事，是三件事**。给 `pid_of` 插桩（`_deploy/_qa/diag_miss.py`）才看清：
-   未命中的主体是"**表里完全没有这个端口**"；再用 100 ms 高频轮询判别（`diag_race.py`）后得到
+2. **"未归因"不是一件事，是三件事**。给 `pid_of` 插桩（`scripts/diag_miss.py`）才看清：
+   未命中的主体是"**表里完全没有这个端口**"；再用 100 ms 高频轮询判别（`scripts/diag_race.py`）后得到
    硬结论 —— **20.5% 的未归因字节属"短命 socket 漏拍"，79.5% 属"表里从未出现过"**。
 3. **"System Idle Process 在用带宽"是假象**。非提权调用时有 **899/5394 条**端点的 owning PID
    返回 0，第一版把它们记到了 PID 0 账上（UI 上就出现"System Idle Process 在发数据"）。
@@ -137,7 +137,7 @@ device=\Device\NPF_{4FC5DA1D-...}  端点表 6299 个（刷新 203 ms）
 但那不是诚实的做法。
 
 剩下的缺口是**结构性**的，调参补不了：生存期几十毫秒的 socket（本机实测是代理客户端的出站连接，
-一个请求一条连接）在 60 ms/次的表读面前必然漏掉 —— 把轮询提到 165 ms 也抓不到（`diag_race.py`）。
+一个请求一条连接）在 60 ms/次的表读面前必然漏掉 —— 把轮询提到 165 ms 也抓不到（`scripts/diag_race.py`）。
 要根治得换事件源：**ETW `Microsoft-Windows-Kernel-Network`**（连接建立时内核就带 PID 报事件），
 代价是 ctypes 打通 TDH 实时会话，量级数百行。
 
@@ -149,7 +149,7 @@ device=\Device\NPF_{4FC5DA1D-...}  端点表 6299 个（刷新 203 ms）
 
 1. **把表读得更快**：实测把逐行 `struct.unpack` 换成 `array` 批量解析只有 **1.6×**
    （58.4 ms → 35.8 ms / 5300 行），瓶颈在 iphlpapi 本身的 4 次表收集调用；照这个数，
-   10 Hz 轮询要吃掉单核 **36%**、20 Hz 是 72% —— **不值得**（`_deploy/_qa/bench_table.py`）。
+   10 Hz 轮询要吃掉单核 **36%**、20 Hz 是 72% —— **不值得**（`scripts/bench_table.py`）。
 2. **端口级推断**（"这个端口大概归谁"）：只有单侧信息，CDN 与端口复用场景会混淆归属 —— 不做。
 
 于是只剩换事件源：**ETW `Microsoft-Windows-Kernel-Network`**，内核在**连接建立那一刻**就带 PID 报事件。
@@ -186,7 +186,7 @@ IPv4 地址 4 字节、IPv6 16 字节，关键字 IPv4=0x10 / IPv6=0x20。
 
 ### 验证状态（不夸大）
 
-- ✅ **解析层**：`_deploy/_qa/test_etw.py` 覆盖 IPv4/IPv6、connect/accept/disconnect、截断载荷、
+- ✅ **解析层**：`tests/test_etw.py` 覆盖 IPv4/IPv6、connect/accept/disconnect、截断载荷、
   PID/端口非法值、以及"`daddr`/`saddr` 反了能否被 sanity 抓住" —— 全绿
 - ✅ **布局**：尺寸断言 + 偏移交叉验证通过
 - ✅ **降级路径**：非提权实测 `denied`，主链路无影响
@@ -254,7 +254,7 @@ GET /api/history/domains?minutes=60&limit=20&named_only=true
 ### 事故：这个自锁把整个 API 冻住了
 
 第一版上线后 `/api/health` 超时，**连不碰数据库的 `/api/meta` 也超时** —— 说明不是查询慢，
-而是事件循环被堵死。带看门狗的复现（`_deploy/_qa/repro_history.py`）把位置钉在 `stats()`：
+而是事件循环被堵死。带看门狗的复现（`scripts/repro_history.py`）把位置钉在 `stats()`：
 `append` 正常、`stats` 直接挂死。
 
 根因是我自己写的"所有语句统一走 _execute 入口"那步：全局把 `self._conn.execute(` 换成
@@ -269,6 +269,34 @@ GET /api/history/domains?minutes=60&limit=20&named_only=true
 
 > 教训：**"统一入口"式的全局替换必须排除新引入的代码自身**；幂等判断也不能用裸前缀
 > （`def health(` 是 `async def health(` 的子串，我因此漏改了 5 个签名）。
+
+## 复现与验证（脚本都在仓库里）
+
+README 里的每个数字都有对应脚本，**不需要 pytest、不需要网络**（前三个连抓包设备都不需要）：
+
+| 脚本 | 做什么 |
+|---|---|
+| `tests/test_names.py` | 域名解析层：DNS 压缩指针、各类畸形包（含指针自指不死循环）、TLS SNI、缓存 TTL 与上限（18 项） |
+| `tests/test_domain_history.py` | 历史层域名聚合：同桶累计、排序、`named_only` 过滤、时间窗口边界（9 项） |
+| `tests/test_etw.py` | ETW：结构体尺寸断言、载荷解析（IPv4/IPv6 × connect/accept/disconnect × 截断/非法值）、sanity 校验、非提权降级路径 |
+| `scripts/bench_table.py` | 连接表读取基准（现状 vs `array` 批量解析）—— 支撑"解析优化只有 1.6×、10 Hz 要 36% 单核"的结论 |
+| `scripts/diag_miss.py` | 给 `pid_of` 插桩，统计未命中的**原因分布**（"表里没有这个端口"占比多少） |
+| `scripts/diag_race.py` | 100 ms 高频轮询判别：未归因的那些本地端口"到底存在过吗" |
+| `scripts/unknown_probe.py` | 按秒采样未归因率，输出均值 / 中位 / 极值（而不是盯一个数） |
+| `scripts/repro_history.py` | 历史层独立复现：喂合成窗口逐步调用，用来定位"卡在哪一步"（配 `scripts/run_repro.ps1` 带看门狗运行） |
+| `scripts/flowwatch_check.py` | 前端端到端：加载页面、断言有数据、点行看明细、截图，并报告 JS 错误与隐私泄漏自检 |
+| `scripts/check_panels.py` | 断言各面板的渲染位置与文本（含整页截图），排查"面板没出来"这类问题 |
+| `scripts/shots_repo.py` | 生成 README 用的两张截图：**截图前对 DOM 脱敏并断言无泄漏**（个人域名用 `--extra` 传入，不写进仓库） |
+| `scripts/restart_server.ps1` | 重启后端：先清掉端口上**所有**监听者（Windows 允许重复绑定，残留进程会让"改了代码却没生效"） |
+
+```bash
+python tests/test_names.py            # 三份单测，随时可跑
+python tests/test_domain_history.py
+python tests/test_etw.py
+```
+
+> 其余脚本需要工具在运行时使用（`python server.py` + `cd web && npm run dev`），
+> 它们读的是 `/api/health`、`/api/rates` 等本机接口。ETW 的端到端验证需要管理员运行，见上文《ETW 归因》。
 
 ## 架构
 

@@ -184,19 +184,32 @@ IPv4 地址 4 字节、IPv6 16 字节，关键字 IPv4=0x10 / IPv6=0x20。
 > 拿到的是 5（拒绝访问）而不是 87/234（参数/长度错误），反过来说明 `EVENT_TRACE_PROPERTIES`
 > 缓冲区结构是健康的（Windows 先校验参数、后判权限）—— 这是非提权环境下能得到的间接证据。
 
-### 验证状态（不夸大）
+### 验证状态：**实时消费没打通**（六次提权实验的结论，不夸大）
 
-- ✅ **解析层**：`tests/test_etw.py` 覆盖 IPv4/IPv6、connect/accept/disconnect、截断载荷、
-  PID/端口非法值、以及"`daddr`/`saddr` 反了能否被 sanity 抓住" —— 全绿
-- ✅ **布局**：尺寸断言 + 偏移交叉验证通过
-- ✅ **降级路径**：非提权实测 `denied`，主链路无影响
-- ⏳ **端到端 happy path 需要一次管理员运行**（我这里无法提权）：
-  ```powershell
-  # 以管理员身份打开 PowerShell
-  cd <项目根>; python collector.py --seconds 15 --diag
-  # 期望输出：ETW 归因: running · 事件 N 条 / 学到连接 M 个（且未归因率低于不开 ETW 时）
-  ```
-  在那次验证之前，我不会声称"那 30% 已经解决" —— 代码在，证据目前只覆盖解析层与降级路径。
+提权跑了 6 轮判别实验，逐层把责任面缩小到"我这一侧的消费端"：
+
+| # | 实验 | 结果 |
+|---|---|---|
+| 1 | 提权 A/B（`--no-etw` vs 默认） | `StartTraceW = 0` ✓（提权与 `EVENT_TRACE_PROPERTIES` 都通过）；`EnableTraceEx = 87` ✗ |
+| 2 | 启用方式判别 | `EnableTraceEx2` = 0 ✓；**旧的 `EnableTraceEx` 对内核与用户态 provider 都返回 87** ✗ → 已改为 `EnableTraceEx2` |
+| 3 | 事件数为 0 的原因 | **用户态 provider 对照也是 0 条** ✗ → 不是内核 provider 的特殊要求 |
+| 4 | (mode 偏移 × 回调偏移) 网格 | 21 组组合**全部 0 次回调** ✗ → 也不是回调偏移 |
+| 5 | **绕过本层、用系统 `logman` 采同一 provider** | 9 秒采到 **73,981 条** Kernel-Network 事件（`tracerpt` 转 CSV 验证）✓✓ |
+| 6 | 挂到 `logman` 建的实时会话 | 仍 **0 次回调** ✗（自检显示交给 ETW 的字节正确：mode `0x10000100`、回调指针已写、句柄有效） |
+
+**结论**：数据源、权限、会话创建、provider 启用全部正常 —— **本层的 `OpenTraceW` + `ProcessTrace` 实时消费拿不到事件**。
+所以本层当前**不产出任何归因**（fail-closed 设计保证它也不会误归因），未归因率仍由表归因 + 两层记忆承担。
+
+- ✅ **解析层**：`tests/test_etw.py` 覆盖 IPv4/IPv6、connect/accept/disconnect、截断载荷、PID/端口非法值，
+  以及"`daddr`/`saddr` 反了能否被 sanity 抓住" —— 全绿
+- ✅ **布局**：尺寸断言 + 偏移交叉验证（`EventRecordCallback` 偏移 432，与按文档手推一致）
+- ✅ **启用方式**：按实验结果改为 `EnableTraceEx2`（代码注释里写明了 87 的来源）
+- ✅ **降级路径**：非提权 `state="denied"`（Win32 `error_code=5`），主链路不受影响
+- ❌ **实时消费**：未打通（见上表），诊断脚本都在 `scripts/etw_probe_*.py`，每个都写明"它证明/排除了什么"
+
+**下一步（不必再靠猜）**：① 用成熟库（`pywintrace` / `krabsetw`）验证是 ctypes 用法问题还是环境差异；
+② 走**已被实验证明可用**的批量路线 —— `logman` 短周期采 ETL + `tracerpt` 解析，延迟 1–3 秒，
+够用来把短命连接的归属补上（本工具的窗口是 1 秒，可接受）。
 
 ## 域名解析：把 IP 变回人看得懂的名字
 
@@ -288,6 +301,13 @@ README 里的每个数字都有对应脚本，**不需要 pytest、不需要网�
 | `scripts/check_panels.py` | 断言各面板的渲染位置与文本（含整页截图），排查"面板没出来"这类问题 |
 | `scripts/shots_repo.py` | 生成 README 用的两张截图：**截图前对 DOM 脱敏并断言无泄漏**（个人域名用 `--extra` 传入，不写进仓库） |
 | `scripts/restart_server.ps1` | 重启后端：先清掉端口上**所有**监听者（Windows 允许重复绑定，残留进程会让"改了代码却没生效"） |
+| `scripts/etw_probe_variants.py` | ETW 启用方式判别：证明 `EnableTraceEx2` 可用、旧 `EnableTraceEx` 恒 87（对内核对用户态 provider 都一样） |
+| `scripts/etw_probe_offsets.py` | ETW 回调偏移网格搜索：21 组 (mode × 回调) 组合全部 0 回调，排除"偏移写错" |
+| `scripts/etw_probe_logman.py` | 绕过本层用系统 `logman` 采同一 provider：9 秒 73981 条事件，证明数据源与权限正常 |
+| `scripts/etw_probe_attach.py` | 挂到 `logman` 建的实时会话：本层仍 0 回调（附带自检：交给 ETW 的字节是正确的） |
+
+> 后四个需要**管理员**运行（创建 ETW 会话的硬性要求），可用通用启动器：
+> `powershell -NoProfile -ExecutionPolicy Bypass -File scripts/run_elevated.ps1 scripts/etw_probe_logman.py`
 
 ```bash
 python tests/test_names.py            # 三份单测，随时可跑

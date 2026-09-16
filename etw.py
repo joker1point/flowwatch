@@ -27,6 +27,21 @@ ETW 在**连接建立那一刻**就带 PID 报事件。
      这一条必然失败），连续失败就停用并如实记录；**宁可不归因，也不误归因**。
   3. **拿不到权限就如实降级**：创建 ETW 会话需要管理员（或 Performance Log Users 组），
      非提权运行时 state="denied"，主链路（表归因）照常工作。
+
+**实测状态（2026-09-16，6 次提权实验的结论，别再重复做）**：
+  - ✅ 提权后 `StartTraceW` = 0（会话与 `EVENT_TRACE_PROPERTIES` 都通过）；
+  - ✅ 启用必须用 **`EnableTraceEx2`**：旧的 9 参数 `EnableTraceEx` 恒返回 87（参数无效），
+     而且**对用户态 provider 也一样**（说明不是内核 provider 的特殊要求，是调用形式问题）；
+  - ✅ **数据源完全正常**：系统自带 `logman start … -p Microsoft-Windows-Kernel-Network 0x30 4 -o x.etl -ets`
+     9 秒采到 **73,981 条**事件（`tracerpt` 转 CSV 验证）；
+  - ❌ **本层的实时消费没打通**：`OpenTraceW` 返回有效句柄（0x101）、交给 ETW 的字节自检正确
+     （mode@28 = 0x10000100、回调指针写在 432、LoggerName 已设），但 `ProcessTrace` **一次回调都没有** ——
+     换自己的会话、换 logman 建的实时会话、21 组 (mode 偏移 × 回调偏移) 网格都试过，全是 0 回调。
+  - 因此本层当前**不产出任何归因**（fail-closed 保证它也不会误归因），未归因率仍是表归因 + 两层记忆在扛。
+
+  后续可走的两条路（都不必再猜）：① 换用成熟库（`pywintrace` / `krabsetw`）验证是 ctypes 用法还是环境差异；
+  ② 走**已验证可用**的批量路线：`logman` 短周期采 ETL + `tracerpt` 解析（延迟 1–3 秒，够用来补全连接归属）。
+  诊断脚本：`scripts/etw_probe_*.py`（每个都写明了它证明/排除了什么）。
 """
 
 from __future__ import annotations
@@ -368,13 +383,17 @@ class EtwConnTracker:
         if started != ERROR_SUCCESS:
             self._explain_start_failure(started)
             return
-        error = self._lib.EnableTraceEx(
+        # 用 EnableTraceEx2（现代 API）。**这是实测结论，不是偏好**：提权判别实验里
+        # 旧的 EnableTraceEx 在 9 参数形式下恒返回 87（参数无效），而且**对用户态 provider 也一样** ——
+        # 说明与"内核 provider 需要特殊路径"无关，是我的调用形式不对；换 EnableTraceEx2 后
+        # 内核 provider 直接返回 0（脚本 `_deploy/_qa/etw_probe_admin.ps1` 留了对照实验）。
+        error = self._lib.EnableTraceEx2(
             self._session, C.byref(self._provider_guid()), C.c_uint32(EVENT_CONTROL_CODE_ENABLE_PROVIDER),
             C.c_ubyte(TRACE_LEVEL_INFORMATION), C.c_uint64(KEYWORD_IPV4 | KEYWORD_IPV6),
-            C.c_uint64(0), C.c_uint32(0), None, None,
+            C.c_uint64(0), C.c_uint32(0), None,
         )
         if error != ERROR_SUCCESS:
-            self.state, self.detail = "failed", f"EnableTraceEx 失败: {error}"
+            self.state, self.detail = "failed", f"EnableTraceEx2 失败: {error}"
             self._stop_session()
             return
 
@@ -495,9 +514,10 @@ class EtwConnTracker:
         lib.StartTraceW.restype = C.c_uint32
         lib.ControlTraceW.argtypes = [C.c_uint64, C.c_wchar_p, C.c_void_p, C.c_uint32]
         lib.ControlTraceW.restype = C.c_uint32
-        lib.EnableTraceEx.argtypes = [C.c_uint64, C.POINTER(GUID), C.c_uint32, C.c_ubyte,
-                                      C.c_uint64, C.c_uint64, C.c_uint32, C.c_void_p, C.c_void_p]
-        lib.EnableTraceEx.restype = C.c_uint32
+        # 8 参数版本（末位 EnableParameters 可为 NULL）；旧的 9 参数 EnableTraceEx 实测恒返 87
+        lib.EnableTraceEx2.argtypes = [C.c_uint64, C.POINTER(GUID), C.c_uint32, C.c_ubyte,
+                                       C.c_uint64, C.c_uint64, C.c_uint32, C.c_void_p]
+        lib.EnableTraceEx2.restype = C.c_uint32
         lib.OpenTraceW.argtypes = [C.POINTER(EventTraceLogfileW)]
         lib.OpenTraceW.restype = C.c_uint64
         lib.ProcessTrace.argtypes = [C.POINTER(C.c_uint64), C.c_uint32, C.c_void_p, C.c_void_p]

@@ -1,0 +1,77 @@
+/* ── 设计令牌 ─────────────────────────────────────────────────────────────
+   portwatch 视觉方向：工业仪器面板。
+   暖调深灰基底 + 琥珀强调，刻意避开 cyan-on-dark / 紫蓝渐变这类模板化配色。
+   色彩统一用 OKLCH 表达，便于做等亮度层的推演。
+   ──────────────────────────────────────────────────────────────────────── */
+
+:root {
+  color-scheme: dark;
+
+  /* 表面层：基底不是纯黑，而是带黄相的深灰（hue 68），长时间盯屏不刺眼 */
+  --bg-base:   oklch(0.168 0.008 68);
+  --bg-panel:  oklch(0.204 0.010 68);
+  --bg-raised: oklch(0.242 0.012 68);
+  --bg-hover:  oklch(0.272 0.014 68);
+
+  /* 文本层 */
+  --text-primary:   oklch(0.935 0.005 68);
+  --text-secondary: oklch(0.705 0.008 68);
+  --text-muted:     oklch(0.532 0.008 68);
+
+  /* 强调色：琥珀。整个界面只有一个强调色，靠亮度与面积拉开层次 */
+  --accent:      oklch(0.795 0.152 72);
+  --accent-soft: oklch(0.795 0.152 72 / 0.14);
+  --accent-line: oklch(0.795 0.152 72 / 0.36);
+
+  /* 语义状态：绿=正常可处置 / 琥珀=归因受限 / 红=系统内核进程不可处置 */
+  --ok:          oklch(0.745 0.132 152);
+  --ok-soft:     oklch(0.745 0.132 152 / 0.14);
+  --warn:        oklch(0.800 0.145 72);
+  --warn-soft:   oklch(0.800 0.145 72 / 0.14);
+  --danger:      oklch(0.672 0.172 28);
+  --danger-soft: oklch(0.672 0.172 28 / 0.16);
+  --info:        oklch(0.735 0.095 245);
+  --info-soft:   oklch(0.735 0.095 245 / 0.14);
+
+  /* 分隔与投影：优先用发丝线，不用粗边框 */
+  --hairline: oklch(0.300 0.010 68 / 0.70);
+  --shadow-pop: 0 18px 38px -18px oklch(0.10 0.006 68 / 0.85);
+
+  /* 字体：Win11 原生 Segoe UI Variable 做 UI；
+     数据列用 Cascadia（Windows Terminal 血统，比 Consolas 少一分陈旧感） */
+  --font-ui: 'Segoe UI Variable Display', 'Segoe UI', system-ui, -apple-system,
+    'PingFang SC', 'Microsoft YaHei', sans-serif;
+  --font-mono: 'Cascadia Mono', 'Cascadia Code', Consolas, ui-monospace,
+    'JetBrains Mono', monospace;
+
+  /* 4pt 基准间距 */
+  --s-1: 4px;
+  --s-2: 8px;
+  --s-3: 12px;
+  --s-4: 16px;
+  --s-5: 20px;
+  --s-6: 24px;
+  --s-7: 32px;
+  --s-8: 48px;
+
+  /* 动效：统一走指数缓出，不用 bounce；仅动 transform / opacity */
+  --ease-out-quart: cubic-bezier(0.25, 1, 0.5, 1);
+  --ease-out-expo: cubic-bezier(0.16, 1, 0.3, 1);
+  --dur-fast: 120ms;
+  --dur-base: 220ms;
+  --dur-slow: 420ms;
+
+  --radius-sm: 5px;
+  --radius-md: 8px;
+  --radius-lg: 12px;
+
+  --header-h: 92px;
+}
+
+@media (prefers-reduced-motion: reduce) {
+  :root {
+    --dur-fast: 0ms;
+    --dur-base: 0ms;
+    --dur-slow: 0ms;
+  }
+}

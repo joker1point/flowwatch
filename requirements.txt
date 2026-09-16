@@ -1,0 +1,12 @@
+# flowwatch 依赖
+# 注意：抓包**不需要**额外 Python 包 —— 通过 ctypes 直接调用系统已安装的
+#      Npcap（wpcap.dll），也不需要管理员权限（除非 Npcap 勾了"仅管理员可抓包"）。
+
+psutil>=5.9          # 连接表 → (ip, port) → PID 的归因来源（归因与历史层都用）
+
+# 以下供 API 层使用
+fastapi>=0.115
+uvicorn>=0.30
+
+# 说明：历史层用标准库 sqlite3，域名解析与 SNI 解析、ETW 归因全部用标准库
+#      （socket / struct / ctypes），不引入额外依赖。

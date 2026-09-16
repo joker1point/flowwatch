@@ -1,0 +1,9 @@
+# 统一按 LF 存储与检出：本仓库只在 Windows 上开发，但 Python / TS / Markdown 都不需要 CRLF，
+# 固定住可以避免"换个环境 clone 后满屏行尾 diff"。
+* text=auto eol=lf
+
+# 二进制资源不做任何转换
+*.png binary
+*.jpg binary
+*.ico binary
+*.db binary

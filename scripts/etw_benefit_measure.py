@@ -78,10 +78,12 @@ def wait_health(timeout: float = 40.0) -> bool:
     return False
 
 
-def start_server(use_etw: bool):
+def start_server(use_etw: bool, udp: bool = False):
     argv = [sys.executable, "server.py", "--port", str(PORT)]
     if use_etw:
         argv.append("--etw")
+    if udp:
+        argv.append("--etw-udp")
     log = open(os.path.join(ROOT, "_run", "server_etw_measure.log"), "ab", buffering=0)
     log.write(f"\n\n===== start {'WITH' if use_etw else 'WITHOUT'} --etw  {time.strftime('%H:%M:%S')} =====\n".encode())
     return subprocess.Popen(argv, cwd=ROOT, stdout=log, stderr=subprocess.STDOUT)
@@ -116,10 +118,11 @@ def start_traffic(seconds: float):
     return subprocess.Popen(argv, cwd=ROOT, stdout=log, stderr=subprocess.STDOUT)
 
 
-def phase(label: str, use_etw: bool) -> dict:
-    print(f"\n===== {label}（{'--etw' if use_etw else '不开 ETW'}）=====")
+def phase(label: str, use_etw: bool, udp: bool = False) -> dict:
+    tag = "不开 ETW" if not use_etw else ("--etw + --etw-udp" if udp else "--etw（仅 TCP）")
+    print(f"\n===== {label}（{tag}）=====")
     kill_listeners(PORT)
-    proc = start_server(use_etw)
+    proc = start_server(use_etw, udp)
     if not wait_health():
         print("  服务没起来，跳过这一阶段")
         stop_server(proc)
@@ -154,7 +157,8 @@ def phase(label: str, use_etw: bool) -> dict:
                 health = api("/api/health")
                 etw_stat = health.get("etw", {})
                 hits = {"sticky": health.get("sticky_hits"), "memory": health.get("memory_hits"),
-                        "masked_bytes": health.get("masked_bytes")}
+                        "masked_bytes": health.get("masked_bytes"),
+                        "sources": health.get("attribution_sources")}
             except Exception:                              # noqa: BLE001
                 pass
         time.sleep(1.0)
@@ -189,6 +193,10 @@ def phase(label: str, use_etw: bool) -> dict:
     print(f"  属主受限(均值): {out['masked_kib']:.1f} KiB/窗口")
     if hits:
         print(f"  兜底命中(累计): 端点短时记忆 {hits.get('sticky')} / 四元组记忆 {hits.get('memory')}")
+        src = hits.get("sources") or {}
+        for name, num in (src.get("hits") or {}).items():
+            kib = (src.get("bytes") or {}).get(name, 0) / 1024.0
+            print(f"    键来源 {name:<8}: 命中 {num:>6} 次 · 救回 {kib:>9.1f} KiB")
     if gen_hist:
         if "bytes" in gen_hist:
             print(f"  受控负载被归因（历史层累计）: {gen_hist['bytes'] / 1024:.1f} KiB "
@@ -204,7 +212,8 @@ def phase(label: str, use_etw: bool) -> dict:
                   f"{(item['out_bytes'] + item['in_bytes']) / 1024:>8.1f} KiB")
     if etw_stat:
         print(f"  ETW: state={etw_stat.get('state')} events={etw_stat.get('events')} "
-              f"learned={etw_stat.get('learned')} forgotten={etw_stat.get('forgotten')} "
+              f"learned={etw_stat.get('learned')}（其中 UDP {etw_stat.get('udp_learned', 0)}）"
+              f" forgotten={etw_stat.get('forgotten')} "
               f"sanity_failures={etw_stat.get('sanity_failures')}")
         if etw_stat.get("detail"):
             print(f"       detail={etw_stat['detail']}")
@@ -223,7 +232,8 @@ print(f"ETW 收益测量   port={PORT}   warmup={WARMUP:.0f}s   samples={SAMPLES
 print("=" * 78)
 
 base = phase("阶段 1 · 提权基线", use_etw=False)
-with_etw = phase("阶段 2 · 提权 + ETW 实时归因", use_etw=True)
+with_etw = phase("阶段 2 · 提权 + ETW（仅 TCP 连接事件）", use_etw=True)
+with_udp = phase("阶段 3 · 提权 + ETW + UDP 事件", use_etw=True, udp=True)
 
 print("\n" + "=" * 78)
 print("【结论】")
@@ -237,7 +247,21 @@ if base and with_etw:
     print(f"  ETW 净贡献  : state={etw.get('state')} learned={etw.get('learned')} "
           f"forgotten={etw.get('forgotten')} sanity_failures={etw.get('sanity_failures')}")
     print("  说明：两阶段都在提权下，所以差值只归因于 ETW 本身。")
-    print("  【关键指标】受控负载（短命连接）被归因的字节 —— 历史层统计，不受 Top-N 截断：")
+    def _src_bytes(phase_data, name):
+        src = ((phase_data.get("hits") or {}).get("sources") or {})
+        return (src.get("bytes") or {}).get(name, 0)
+
+    etw_only = _src_bytes(with_etw, "etw")
+    udp_etw = _src_bytes(with_udp, "etw-udp")
+    base_etw = _src_bytes(base, "etw")
+    print("  【判定指标】按'键的出处'分账 —— 与负载量无关（ETW 是唯一能学到\"表从未见过的四元组\"的来源）：")
+    print(f"    etw 来源救回: 基线 {base_etw / 1024:.1f} KiB（必然为 0）→ +TCP {etw_only / 1024:.1f} KiB"
+          + (f" → +UDP {udp_etw / 1024:.1f} KiB" if with_udp else ""))
+    if etw_only > 0 or udp_etw > 0:
+        print("    → ETW 确实归因了表抓不到的字节（这就是它的净贡献，与整机比率无关）")
+    else:
+        print("    → ETW 学到的键一次都没命中：要么表已全覆盖，要么键的归一化对不上（先查这个）")
+    print("  【参考指标】受控负载（短命连接）被归因的字节 —— 历史层统计，不受 Top-N 截断：")
     base_bytes = (base.get("gen_hist") or {}).get("bytes", 0)
     etw_bytes = (with_etw.get("gen_hist") or {}).get("bytes", 0)
     print(f"    不开 ETW: {base_bytes / 1024:.1f} KiB   →   开 ETW: {etw_bytes / 1024:.1f} KiB")
@@ -247,6 +271,16 @@ if base and with_etw:
         print("    → 方向一致但差距不显著，别急着下结论（加大负载/延长采样再测）")
     else:
         print("    → 没看出 ETW 的贡献：要么表已覆盖这些连接，要么 ETW 没真正生效（先看 state）")
+    if with_udp:
+        udp_etw = with_udp.get("etw") or {}
+        print("\n  【UDP 事件这一档】")
+        print(f"    负载被归因: {base_bytes / 1024:.1f} KiB（基线）→ {etw_bytes / 1024:.1f} KiB（+TCP）")
+              
+        print(f"                → {((with_udp.get('gen_hist') or {}).get('bytes', 0)) / 1024:.1f} KiB（+UDP）")
+        print(f"    ETW 统计: state={udp_etw.get('state')} learned={udp_etw.get('learned')}"
+              f"（UDP {udp_etw.get('udp_learned')}）unusable={udp_etw.get('unusable_events')}"
+              f" sanity_failures={udp_etw.get('sanity_failures')}")
+        print(f"    整机未归因率: 均值 {with_udp['mean']:.1f}% / 中位 {with_udp['median']:.1f}%")
     print(f"  （参考）未归因流条数: 基线 {len(base.get('flows') or [])} → 开 ETW "
           f"{len(with_etw.get('flows') or [])}；两阶段连接本就不同，别只看这个）")
 else:

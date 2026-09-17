@@ -287,6 +287,7 @@ def health() -> dict[str, Any]:
         "masked_bytes": stats.get("masked_bytes", 0),         # 端点已知、属主受权限限制
         "sticky_hits": capturer.index.sticky_hits,            # 端点短时记忆救回次数
         "memory_hits": capturer.conn_memory.hits,             # 四元组记忆救回次数
+        "attribution_sources": capturer.conn_memory.source_stats(),   # 按来源分账（table / etw / etw-udp）
         "history": store.stats(),
         "names": capturer.resolver.stats(),
         "etw": capturer.etw.stats(),          # 实时路线状态（实验性，默认关闭）
@@ -403,6 +404,8 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("--no-history", action="store_true", help="不落历史（纯实时模式）")
     parser.add_argument("--etw", action="store_true",
                         help="实时消费 ETW 补全归因（需管理员；非提权时如实降级为 denied，不影响实时链路）")
+    parser.add_argument("--etw-udp", action="store_true",
+                        help="配合 --etw：额外消费 UDP 事件（opt-in，覆盖 DNS 等；事件量大且内容不齐，见 etw.py 头部）")
     args = parser.parse_args(argv)
 
     PORT = args.port
@@ -410,6 +413,7 @@ def main(argv: list[str] | None = None) -> int:
     if args.dev:
         capturer.device = args.dev
     capturer.use_etw = args.etw      # 必须在 lifespan 启动采集层之前设置（它在 Capturer.start 里生效）
+    capturer.use_etw_udp = args.etw_udp
     store.path = Path(args.db)
     store.retention_days = args.retention_days
     store.enabled = not args.no_history

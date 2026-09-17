@@ -371,24 +371,44 @@ class ConnMemory:
         self.ttl = ttl
         self.capacity = capacity
         self.hits = 0
+        # **按来源分账**：判断"ETW 到底有没有用"唯一与负载量无关的指标 ——
+        # 表学到的键与 ETW 学到的键都是观测事实，但只有 ETW 能学到"表从未见过的四元组"。
+        # （之前用的"受控负载被归因的字节"三次测量给出 3.3× / 1.55× / ~1.0× 互相矛盾，
+        #   因为负载自身字节量在阶段间波动 ±2×，把效应淹没了。）
+        self.hits_by_source: dict[str, int] = {}
+        self.bytes_by_source: dict[str, int] = {}
         # 采集线程写、刷新线程 prune —— **必须有锁**：不加锁时 prune 遍历到一半被插入，
         # 会抛 "dictionary changed size during iteration"（实测在线运行时报出过）。
         self._lock = threading.Lock()
-        self._items: dict[tuple[str, int, str, int], tuple[int, float]] = {}
+        self._items: dict[tuple[str, int, str, int], tuple[int, float, str]] = {}
 
-    def remember(self, key: tuple[str, int, str, int], pid: int) -> None:
+    def remember(self, key: tuple[str, int, str, int], pid: int, source: str = "table") -> None:
+        """source 记录这个键**是谁学到的**：`table`（端点表）/ `etw` / `etw-udp`。
+
+        为什么要记：只有 ETW 能学到表从未见过的四元组，所以"etw 来源的键救回了多少字节"
+        就是它的净贡献，而且不受负载量波动影响。
+        """
         with self._lock:
             if len(self._items) >= self.capacity:
                 self._prune_locked(force=True)
-            self._items[key] = (pid, time.monotonic())
+            self._items[key] = (pid, time.monotonic(), source)
 
-    def lookup(self, key: tuple[str, int, str, int]) -> int | None:
+    def lookup(self, key: tuple[str, int, str, int], length: int = 0) -> int | None:
+        """命中就按来源记账（length 是本次要归因的字节数，便于统计"救回多少"）。"""
         with self._lock:
             item = self._items.get(key)
             if item is None:
                 return None
             self.hits += 1
+            source = item[2]
+            self.hits_by_source[source] = self.hits_by_source.get(source, 0) + 1
+            self.bytes_by_source[source] = self.bytes_by_source.get(source, 0) + max(0, length)
             return item[0]
+
+    def source_stats(self) -> dict[str, dict[str, int]]:
+        """按来源的命中统计（键的出处 → 命中次数 / 救回字节）。"""
+        with self._lock:
+            return {"hits": dict(self.hits_by_source), "bytes": dict(self.bytes_by_source)}
 
     def forget(self, key: tuple[str, int, str, int]) -> None:
         """立刻忘掉一个四元组（ETW 断开事件到达时用）—— 比等 TTL 过期干净。"""
@@ -401,7 +421,7 @@ class ConnMemory:
 
     def _prune_locked(self, force: bool = False) -> int:
         now = time.monotonic()
-        stale = [key for key, (_, stamp) in list(self._items.items()) if now - stamp > self.ttl]
+        stale = [key for key, item in list(self._items.items()) if now - item[1] > self.ttl]
         for key in stale:
             del self._items[key]
         if force and len(self._items) >= self.capacity:
@@ -678,6 +698,7 @@ class Capturer:
         self.etw_batch = etw_batch.EtwBatchTracker(
             self.conn_memory, lambda: self.local_ips, run_dir=Path(__file__).resolve().parent / "_run")
         self.use_etw = False
+        self.use_etw_udp = False     # UDP 事件（opt-in：≈1700 事件/秒的开销，值不值看实测）
         self.use_etw_batch = False
         self.error: str | None = None
         self.device_name: str = ""
@@ -768,7 +789,9 @@ class Capturer:
         refresher.start()
         self._threads.append(refresher)
         if self.use_etw:
-            self.etw.start()          # 实验性（见头部结论）：失败只记录状态，不影响抓包
+            if self.use_etw_udp:
+                self.etw.enable_udp = True   # 见 etw.py 头部：UDP 事件内容不齐，默认关
+            self.etw.start()          # 失败只记录状态，不影响抓包
         if self.use_etw_batch:
             self.etw_batch.start()    # 批量路线（需要管理员；opt-in）
 
@@ -889,7 +912,7 @@ class Capturer:
                 agg.add(pid, f"{src_ip}:{sport}", False, length)
                 self.conn_memory.remember(key, pid)
                 return
-            pid = self.conn_memory.lookup(key)
+            pid = self.conn_memory.lookup(key, length)      # 命中时按来源记账（见 ConnMemory）
             if pid is not None:
                 agg.add(pid, f"{dst_ip}:{dport}" if src_local else f"{src_ip}:{sport}",
                         src_local, length)
@@ -1015,6 +1038,8 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("--diag", action="store_true", help="每个窗口打印未归因明细与分类计数")
     parser.add_argument("--etw", action="store_true",
                         help="实时消费 ETW 补全归因（需管理员；修复见 etw.py 头部 2026-09-17 结案说明）")
+    parser.add_argument("--etw-udp", action="store_true",
+                        help="额外消费 UDP 事件（opt-in：覆盖 DNS 等 UDP，但事件量大、内容不齐，见 etw.py 头部）")
     parser.add_argument("--etw-batch", action="store_true",
                         help="批量路线：logman + tracerpt 补全连接归属（需管理员，窗口 3 秒，救不了短命 socket）")
     args = parser.parse_args(argv)
@@ -1027,6 +1052,7 @@ def main(argv: list[str] | None = None) -> int:
 
     capturer = Capturer(device=args.dev, include_loopback=not args.no_loopback)
     capturer.use_etw = args.etw
+    capturer.use_etw_udp = args.etw_udp
     capturer.use_etw_batch = args.etw_batch
     try:
         capturer.start()

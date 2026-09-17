@@ -16,6 +16,33 @@ ETW 在**连接建立那一刻**就带 PID 报事件。
 | 连接建立 Connectionattempted | **12** | **28** | PID(4) size(4) **daddr** saddr dport(2) sport(2) mss sackopt tsopt wsopt rcvwin … |
 | 连接接受 Connectionaccepted | **15** | **31** | 同上（复用 connect 模板） |
 | 连接断开 Disconnectissued | **13** | **29** | PID(4) size(4) daddr saddr dport(2) sport(2) seqnum connid |
+| UDP 发送（逐数据报） | **42** | **58** | 同连接事件模板（PID(4) size(4) daddr saddr dport(2) sport(2)…） |
+| UDP 接收（逐数据报） | **43** | **59** | 同上 |
+
+> UDP 这两行的 ID 来自本机 provider 清单（`wevtutil gp Microsoft-Windows-Kernel-Network`：
+> opcode 42/43 与它们的 IPv6 镜像 58/59）。**为什么非要 UDP**：connect/accept 只覆盖 TCP，
+> 而实测剩余未归因流里 `*.53 → 本地随机端口`（DNS 响应，每个约 0.1 KiB）占相当比例 ——
+> 那正是 UDP 事件能补的。反过来，UDP 事件是**逐数据报**的，量大，所以它带来的开销要实测。
+>
+> ⚠️ **收发语义不同**：发送事件里 `saddr` 是本机，**接收事件里 `saddr` 是远端**。
+> 与其猜模板语义，不如用"本机地址集合判定哪一侧是本机"把四元组归一化成"本机侧在前"
+> （两边都不是本机就丢弃）—— 这样即使我对 UDP 模板的理解有偏差，也只会漏归因、不会误归因。
+>
+> ⚠️ **UDP 目前是 opt-in（`--etw-udp` / `enable_udp=True`），默认关闭**，原因见下。
+>
+> **模板是对的，是内容不齐**：官方清单（`repnz/etw-providers-docs` 的
+> `Manifests-Win10-18990/Microsoft-Windows-Kernel-Network.xml`）显示 UDP 42/43/58/59
+> **与连接事件同模板**（`PID, size, daddr, saddr, dport, sport, seqnum, connid`）——
+> 所以解析器没问题。但提权 40 秒实测：`events=69722`（≈1700/s，逐数据报就是这么密）、
+> UDP 学到 2200 条、**66,820 条的地址两侧都不是本机接口地址（96%）**。
+> 怀疑是通配绑定（`0.0.0.0` / `::`）或 IPv4-mapped IPv6 的表示形式 —— 这属于**内容**问题，
+> 不是布局问题。（第一版我把它当布局错误，让 fail-closed 把整套归因停了 —— 见下面那条修正。）
+>
+> 处置：**两侧都不是本机的事件直接跳过（不学）**，不再累计到停用阈值 ——
+> 我们从不认识的事件里学习，就没有误归因风险；只有"≥98% 的事件都不可用"才判定为布局错误并停用。
+> 同一阶段整机未归因率还从 16.7% 恶化到 37.4%，怀疑是事件洪峰抢占了热路径 CPU（≈1700/s），
+> 所以 UDP 默认关：它是**开销换覆盖**的买卖，值不值由 `scripts/etw_benefit_measure.py`
+> 的三阶段对照（基线 / +ETW / +ETW+UDP）说话。
 
 地址宽度：IPv4 = 4 字节，IPv6 = 16 字节。关键字：IPv4=0x10，IPv6=0x20。
 
@@ -64,8 +91,12 @@ PROVIDER_NAME = "Microsoft-Windows-Kernel-Network"
 KEYWORD_IPV4 = 0x10
 KEYWORD_IPV6 = 0x20
 
-LEARN_EVENTS = {12: 4, 15: 4, 28: 16, 31: 16}   # 建立/接受 → 记住四元组 → PID
-FORGET_EVENTS = {13: 4, 29: 16}                 # 断开 → 立刻忘掉（比等 TTL 干净）
+# 连接建立/接受 → 记住四元组 → PID（IPv4=4 字节地址，IPv6=16）
+TCP_LEARN_EVENTS = {12: 4, 15: 4, 28: 16, 31: 16}
+# UDP 收发（逐数据报）→ 同样记住四元组 → PID。事件 ID 见头部文档（来自本机 provider 清单）。
+UDP_LEARN_EVENTS = {42: 4, 43: 4, 58: 16, 59: 16}
+LEARN_EVENTS = {**TCP_LEARN_EVENTS, **UDP_LEARN_EVENTS}
+FORGET_EVENTS = {13: 4, 29: 16}                 # 断开 → 立刻忘掉（比等 TTL 干净）；UDP 没有断开事件，靠 TTL
 
 EVENT_TRACE_REAL_TIME_MODE = 0x00000100
 PROCESS_TRACE_MODE_EVENT_RECORD = 0x10000000
@@ -79,6 +110,8 @@ ERROR_ALREADY_EXISTS = 183
 EVENT_TRACE_CONTROL_STOP = 1
 
 SANITY_FAIL_LIMIT = 5      # 连续这么多条事件过不了 sanity 就停用（宁可不用，不许误归因）
+UNUSABLE_RATIO_LIMIT = 0.98  # 仅当"几乎全部事件"都不可用时才判定为布局错误并停用
+UNUSABLE_MIN_SAMPLE = 200    # 样本太小不下结论（避免刚启动就误判）
 
 # Windows 的地址族取值（与 collector.py 一致）
 AF_INET = 2
@@ -305,6 +338,17 @@ def addr_text(raw: bytes, addr_size: int) -> str:
     return socket.inet_ntop(socket.AF_INET6, raw).lower()
 
 
+def _norm_addr(addr: str) -> str:
+    """IPv4-mapped IPv6（`::ffff:a.b.c.d`）归一化成 IPv4。
+
+    为什么需要：实测 UDP 事件里有这种表示形式，不归一化的话整条事件会被判成
+    "两侧都不是本机"而丢掉（这是纯字符串归一化，放在模块级，别塞进热路径函数里每次重建）。
+    """
+    if addr.startswith("::ffff:") and "." in addr:
+        return addr[7:]
+    return addr
+
+
 def parse_connection(payload: bytes, addr_size: int) -> dict[str, Any] | None:
     """解析连接事件载荷（connect / accept / disconnect 三类的前 6 个字段相同）。
 
@@ -332,6 +376,20 @@ def parse_connection(payload: bytes, addr_size: int) -> dict[str, Any] | None:
     }
 
 
+def local_first(parsed: dict[str, Any], local_ips: set[str]) -> tuple[tuple | None, bool]:
+    """把四元组归一化成「本机侧在前」，返回 (key, 该包是否为出站)。
+
+    为什么不能用 saddr 当本机：**UDP 接收事件的 saddr 是远端**（发送事件才是本机）。
+    与其去猜模板语义，不如用本机地址集合判定 —— 两边都不属于本机就返回 (None, False)，
+    由调用方记成 sanity 失败（fail-closed：宁可漏归因，不许误归因）。
+    """
+    if _norm_addr(parsed["saddr"]) in local_ips and 0 < parsed["sport"] <= 65535:
+        return (parsed["saddr"], parsed["sport"], parsed["daddr"], parsed["dport"]), True
+    if _norm_addr(parsed["daddr"]) in local_ips and 0 < parsed["dport"] <= 65535:
+        return (parsed["daddr"], parsed["dport"], parsed["saddr"], parsed["sport"]), False
+    return None, False
+
+
 def sane(parsed: dict[str, Any], local_ips: set[str]) -> bool:
     """硬校验：**本机侧地址必须真属于本机**。
 
@@ -350,7 +408,10 @@ class EtwConnTracker:
     """
 
     def __init__(self, conn_memory: Any, local_ips_provider: Any,
-                 session_name: str = "flowwatch-etw") -> None:
+                 session_name: str = "flowwatch-etw", enable_udp: bool = False) -> None:
+        # enable_udp 默认关闭：UDP 事件载荷语义尚未校准（见头部文档的实测记录），
+        # 打开会让整套归因因 sanity 失败而自停 —— 等 dump 校准后再默认开。
+        self.enable_udp = enable_udp
         self.conn_memory = conn_memory
         self.local_ips_provider = local_ips_provider
         self.session_name = session_name
@@ -359,6 +420,8 @@ class EtwConnTracker:
         self.error_code = 0          # 最近一次失败的 Win32 错误码（诊断用）
         self.events = 0
         self.learned = 0
+        self.udp_learned = 0          # 其中来自 UDP 事件的比例（用来判断它值不值开销）
+        self.unusable = 0             # 两侧都不是本机、被跳过的事件数（内容不齐，不是布局问题）
         self.forgotten = 0
         self.sanity_failures = 0
         self.last_event_ts = 0.0
@@ -401,6 +464,9 @@ class EtwConnTracker:
                 "detail": self.detail,
                 "events": self.events,
                 "learned": self.learned,
+                "udp_learned": self.udp_learned,
+                "udp_enabled": self.enable_udp,
+                "unusable_events": self.unusable,
                 "forgotten": self.forgotten,
                 "sanity_failures": self.sanity_failures,
                 "since_last_event": round(time.time() - self.last_event_ts, 1) if self.last_event_ts else None,
@@ -472,8 +538,10 @@ class EtwConnTracker:
             self.detail = "创建 ETW 会话需要管理员（或 Performance Log Users 组成员）—— 保持表归因，不影响实时链路"
         elif code == ERROR_ALREADY_EXISTS:
             self.state = "failed"
-            self.detail = ("同名 ETW 会话已存在，且停掉后重建仍失败 —— 可能被别的进程占着"
-                           "（用 `logman query -ets` 看，`logman stop <名字> -ets` 清）")
+            self.detail = (f"同名 ETW 会话 '{self.session_name}' 已存在，且停掉后重建仍失败 —— "
+                           "最常见的原因是**它是别的（提权）进程留下的，而当前进程没有权限停它**；"
+                           "注意非提权的 `logman query -ets` **看不到**提权进程建的会话（实测），"
+                           "所以\"查不到\"不等于没残留 —— 以管理员跑一次就会自愈（同一路径会先 ControlTrace(STOP) 再重建）")
         elif code in (87, ERROR_MORE_DATA):
             self.state = "layout_mismatch"
             self.detail = f"StartTraceW 返回 {code}，EVENT_TRACE_PROPERTIES 布局可疑: {LAYOUT_DETAIL}"
@@ -521,6 +589,8 @@ class EtwConnTracker:
 
     def _handle_record(self, record: EventRecord) -> None:
         event_id = record.EventHeader.EventDescriptor.Id
+        if event_id in UDP_LEARN_EVENTS and not self.enable_udp:
+            return                       # 未校准的 UDP 事件直接不读（省开销，也免得自伤）
         addr_size = LEARN_EVENTS.get(event_id) or FORGET_EVENTS.get(event_id)
         if addr_size is None:
             return
@@ -529,26 +599,39 @@ class EtwConnTracker:
             return
         payload = C.string_at(record.UserData, length)
         parsed = parse_connection(payload, addr_size)
+        is_udp = event_id in UDP_LEARN_EVENTS
         with self._lock:
             self.events += 1
             self.last_event_ts = time.time()
             if parsed is None:
                 return
             local_ips = self.local_ips_provider() or set()
-            if local_ips and not sane(parsed, local_ips):
-                self.sanity_failures += 1
-                if self.sanity_failures >= SANITY_FAIL_LIMIT:
-                    self.state = "sanity_failed"
-                    self.detail = ("连续 %d 条事件的本机地址不属于本机 —— 字段理解有误，已停用 ETW 归因"
-                                   "（绝不误归因）" % self.sanity_failures)
-                    self._stop.set()
-                return
-        key = (parsed["saddr"], parsed["sport"], parsed["daddr"], parsed["dport"])
+            if local_ips:
+                key, _is_out = local_first(parsed, local_ips)   # 本机侧在前（UDP 接收事件里 saddr 是远端）
+                if key is None:
+                    # 两侧都不是本机：**跳过、不学**（不学就不会误归因），也**不再**因此停用整套归因 ——
+                    # 实测 UDP 事件里 96% 是这种（通配绑定 / mapped IPv6 的表示），
+                    # 若按"连续 5 条就停用"的老规则，一开 UDP 就会把自己关掉（第一版就这么踩的）。
+                    # 只有"几乎全部事件都不可用"才说明布局真的错了 —— 那才停用。
+                    self.unusable += 1
+                    if (self.events >= UNUSABLE_MIN_SAMPLE
+                            and self.unusable / self.events >= UNUSABLE_RATIO_LIMIT):
+                        self.state = "sanity_failed"
+                        self.detail = ("%d/%d 条事件的地址两侧都不属于本机 —— 判定为字段布局错误，"
+                                       "已停用 ETW 归因（绝不误归因）" % (self.unusable, self.events))
+                        self._stop.set()
+                    return
+            else:
+                # 拿不到本机地址集合时退回旧假设（连接事件里 saddr 是本机）——宁可少记，不敢乱记
+                key = (parsed["saddr"], parsed["sport"], parsed["daddr"], parsed["dport"])
         if event_id in LEARN_EVENTS:
-            self.conn_memory.remember(key, parsed["pid"])
+            self.conn_memory.remember(key, parsed["pid"],
+                                      source="etw-udp" if is_udp else "etw")
             with self._lock:
                 self.learned += 1
-        else:                                   # 断开：立刻忘掉，比等 TTL 干净
+                if is_udp:
+                    self.udp_learned += 1
+        else:                                   # 断开：立刻忘掉，比等 TTL 干净（UDP 没有断开事件，靠 TTL）
             self.conn_memory.forget(key)
             with self._lock:
                 self.forgotten += 1

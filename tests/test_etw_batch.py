@@ -72,9 +72,13 @@ check("sport=0", etw_batch.parse_dump(event(12, PID="9", daddr="1.1.1.1", saddr=
 check("非连接事件（send）", etw_batch.parse_dump(SEND_V4), [])
 check("空输入", etw_batch.parse_dump(b""), [])
 
-print("\n=== 事件表与 etw.py 保持一致 ===")
-check("learn 表就是 etw.LEARN_EVENTS", etw_batch.LEARN, __import__("etw").LEARN_EVENTS)
-check("forget 表就是 etw.FORGET_EVENTS", etw_batch.FORGET, __import__("etw").FORGET_EVENTS)
+print("\n=== 事件表与 etw.py 保持一致（**TCP 子集**）===")
+# 批量路线**有意只覆盖 TCP**：它的定位是取证/补充（3–6 秒延迟，救不了短命 socket），
+# 而 UDP 事件是逐数据报、内容又大多不可用（etw.py 头部实测：96% 事件的地址两侧都不属于本机）——
+# 所以这里对齐的是 TCP 子集，而不是含 UDP 的完整表。实时层若要 UDP 用 `--etw-udp` 单独开。
+_etw = __import__("etw")
+check("learn 表就是 etw.TCP_LEARN_EVENTS", etw_batch.LEARN, _etw.TCP_LEARN_EVENTS)
+check("forget 表就是 etw.FORGET_EVENTS", etw_batch.FORGET, _etw.FORGET_EVENTS)
 
 print(f"\n{'全部通过' if not FAILURES else '失败项: ' + ', '.join(FAILURES)}")
 raise SystemExit(1 if FAILURES else 0)

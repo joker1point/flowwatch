@@ -197,6 +197,11 @@ def phase(label: str, use_etw: bool, udp: bool = False) -> dict:
         for name, num in (src.get("hits") or {}).items():
             kib = (src.get("bytes") or {}).get(name, 0) / 1024.0
             print(f"    键来源 {name:<8}: 命中 {num:>6} 次 · 救回 {kib:>9.1f} KiB")
+        print(f"    未命中 {src.get('misses')} 次；近邻候选来源 {src.get('near_by_source') or '（无同端口候选）'}")
+        if src.get("near_diff"):
+            print(f"    近邻差异字段组合: {src['near_diff']}")
+        for sample in (src.get("near_samples") or [])[:3]:
+            print(f"      查 {sample['lookup']} ↔ 候选 {sample['candidate']}（来源 {sample['source']}）")
     if gen_hist:
         if "bytes" in gen_hist:
             print(f"  受控负载被归因（历史层累计）: {gen_hist['bytes'] / 1024:.1f} KiB "

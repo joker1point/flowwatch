@@ -377,6 +377,13 @@ class ConnMemory:
         #   因为负载自身字节量在阶段间波动 ±2×，把效应淹没了。）
         self.hits_by_source: dict[str, int] = {}
         self.bytes_by_source: dict[str, int] = {}
+        # 未命中诊断（回答"ETW 学到的键为什么没被用上"）：只探前 400 次未命中，
+        # 因为每次探针都要遍历记忆（4096 条），热路径开销必须封顶。
+        self.misses = 0
+        self._probe_budget = 400
+        self.near_by_source: dict[str, int] = {}     # 近邻候选来自哪个来源
+        self.near_diff: dict[str, int] = {}          # 差异字段组合 → 次数
+        self.near_samples: list[dict] = []           # 最多 5 组原始样本（肉眼判读用）
         # 采集线程写、刷新线程 prune —— **必须有锁**：不加锁时 prune 遍历到一半被插入，
         # 会抛 "dictionary changed size during iteration"（实测在线运行时报出过）。
         self._lock = threading.Lock()
@@ -398,6 +405,8 @@ class ConnMemory:
         with self._lock:
             item = self._items.get(key)
             if item is None:
+                self.misses += 1
+                self._probe_near_locked(key)
                 return None
             self.hits += 1
             source = item[2]
@@ -405,10 +414,40 @@ class ConnMemory:
             self.bytes_by_source[source] = self.bytes_by_source.get(source, 0) + max(0, length)
             return item[0]
 
-    def source_stats(self) -> dict[str, dict[str, int]]:
-        """按来源的命中统计（键的出处 → 命中次数 / 救回字节）。"""
+    def _probe_near_locked(self, key: tuple[str, int, str, int]) -> None:
+        """未命中时找"同本地端口"的记录，统计差异字段与候选来源（调用方已持锁）。"""
+        if self._probe_budget <= 0:
+            return
+        self._probe_budget -= 1
+        laddr, lport, raddr, rport = key
+        for cand, (_pid, _ts, source) in list(self._items.items()):
+            if cand[1] != lport:
+                continue
+            self.near_by_source[source] = self.near_by_source.get(source, 0) + 1
+            diff = []
+            if cand[0] != laddr:
+                diff.append("local_addr")
+            if cand[2] != raddr:
+                diff.append("remote_addr")
+            if cand[3] != rport:
+                diff.append("remote_port")
+            label = "+".join(diff) or "exact"
+            self.near_diff[label] = self.near_diff.get(label, 0) + 1
+            if len(self.near_samples) < 5:
+                self.near_samples.append({"lookup": key, "candidate": cand, "source": source})
+            break
+
+    def source_stats(self) -> dict[str, Any]:
+        """按来源的命中统计 + 未命中诊断（键的出处 → 命中次数 / 救回字节）。"""
         with self._lock:
-            return {"hits": dict(self.hits_by_source), "bytes": dict(self.bytes_by_source)}
+            return {
+                "hits": dict(self.hits_by_source),
+                "bytes": dict(self.bytes_by_source),
+                "misses": self.misses,
+                "near_by_source": dict(self.near_by_source),
+                "near_diff": dict(self.near_diff),
+                "near_samples": list(self.near_samples),
+            }
 
     def forget(self, key: tuple[str, int, str, int]) -> None:
         """立刻忘掉一个四元组（ETW 断开事件到达时用）—— 比等 TTL 过期干净。"""

@@ -28,20 +28,26 @@ ETW 在**连接建立那一刻**就带 PID 报事件。
   3. **拿不到权限就如实降级**：创建 ETW 会话需要管理员（或 Performance Log Users 组），
      非提权运行时 state="denied"，主链路（表归因）照常工作。
 
-**实测状态（2026-09-16，6 次提权实验的结论，别再重复做）**：
-  - ✅ 提权后 `StartTraceW` = 0（会话与 `EVENT_TRACE_PROPERTIES` 都通过）；
-  - ✅ 启用必须用 **`EnableTraceEx2`**：旧的 9 参数 `EnableTraceEx` 恒返回 87（参数无效），
-     而且**对用户态 provider 也一样**（说明不是内核 provider 的特殊要求，是调用形式问题）；
-  - ✅ **数据源完全正常**：系统自带 `logman start … -p Microsoft-Windows-Kernel-Network 0x30 4 -o x.etl -ets`
-     9 秒采到 **73,981 条**事件（`tracerpt` 转 CSV 验证）；
-  - ❌ **本层的实时消费没打通**：`OpenTraceW` 返回有效句柄（0x101）、交给 ETW 的字节自检正确
-     （mode@28 = 0x10000100、回调指针写在 432、LoggerName 已设），但 `ProcessTrace` **一次回调都没有** ——
-     换自己的会话、换 logman 建的实时会话、21 组 (mode 偏移 × 回调偏移) 网格都试过，全是 0 回调。
-  - 因此本层当前**不产出任何归因**（fail-closed 保证它也不会误归因），未归因率仍是表归因 + 两层记忆在扛。
+**零回调之谜：结案于 2026-09-17（根因不是会话、不是权限、不是环境）**：
+  - ✅ 提权后 `StartTraceW` = 0；启用必须用 **`EnableTraceEx2`**（旧的 9 参数 `EnableTraceEx` 恒返回 87）；
+  - ✅ **数据源完全正常**：`logman -p Microsoft-Windows-Kernel-Network 0x30 4` 9 秒采到 73,981 条事件；
+  - ❌ 但实时消费**零回调**，而当时的自检"回调指针写在 432"被我误读成"写对了" ——
+    它其实是**偏移本身就错了**（Windows 在 424 处取回调指针）。
+  - 🎯 **根因：`EVENT_TRACE_HEADER` 多了一个 8 字节字段**。现代 SDK 里这个结构体**没有**
+    `KernelTime`/`UserTime`（XP 时代 MOF 版本才有），我照旧文档写多出一个 `ProcessorTime` →
+    `EVENT_TRACE` 变 96（应 88）→ `EVENT_TRACE_LOGFILEW` 里 `CurrentEvent` 之后所有字段后移 8 →
+    回调指针落到 432 而 Windows 读 424（视为 NULL）→ `ProcessTrace` 静默零回调。
+    第二处错：`Wnode.Flags` 写成 `0x2`（那是 `WNODE_FLAG_INSTANCE`），应为 `0x20000`。
+  - 🔍 定位手段：**与成熟库 pywintrace 0.2.0 逐项对照结构体尺寸/偏移**（`_deploy/_qa/diff_layout.py`）——
+    一次撞出，比 21 组"mode 偏移 × 回调偏移"网格瞎试有效得多。
+  - 📌 教训：**只断言 sizeof 不够，关键字段的 offset 必须一起断言**；而且自检值要来自
+    "独立参照物"（成熟库/官方头文件），不能来自我自己的推算 —— 我自检里 `sizeof(EventRecord)==112`、
+    `sizeof(EventHeader)==80` 都是对的，唯独嵌套在 LOGFILE 里的那个结构体错了，而它没有任何断言。
+  - 现在 `LAYOUT_OK` 连偏移一起断言（基准值 = pywintrace 的实际布局），布局不符就根本不启用。
 
-  后续可走的两条路（都不必再猜）：① 换用成熟库（`pywintrace` / `krabsetw`）验证是 ctypes 用法还是环境差异；
-  ② 走**已验证可用**的批量路线：`logman` 短周期采 ETL + `tracerpt` 解析（延迟 1–3 秒，够用来补全连接归属）。
-  诊断脚本：`scripts/etw_probe_*.py`（每个都写明了它证明/排除了什么）。
+ 另有一条**已验证可用**的批量路线作为补充：`logman` 短周期采 ETL + `tracerpt` 解析
+（见 `etw_batch.py`，延迟 3–6 秒，救不了短命 socket，但可作取证）。
+诊断脚本：`scripts/etw_probe_*.py`（每个都写明了它证明/排除了什么）。
 """
 
 from __future__ import annotations
@@ -64,6 +70,7 @@ FORGET_EVENTS = {13: 4, 29: 16}                 # 断开 → 立刻忘掉（比�
 EVENT_TRACE_REAL_TIME_MODE = 0x00000100
 PROCESS_TRACE_MODE_EVENT_RECORD = 0x10000000
 PROCESS_TRACE_MODE_REAL_TIME = 0x00000100
+WNODE_FLAG_TRACED_GUID = 0x00020000     # wmistr.h：**不是 0x2**（0x2 是 WNODE_FLAG_INSTANCE）
 EVENT_CONTROL_CODE_ENABLE_PROVIDER = 1
 TRACE_LEVEL_INFORMATION = 4
 ERROR_SUCCESS = 0
@@ -138,6 +145,19 @@ class TimeZoneInformation(C.Structure):
 
 
 class EventTraceHeader(C.Structure):
+    """**这个结构体是我最初踩坑的地方，注释必须留着**。
+
+    现代 Windows SDK（`evntrace.h`）的 EVENT_TRACE_HEADER **没有** `KernelTime`/`UserTime`
+    两个字段（那是 XP 时代 MOF 版本的遗留）。我第一版照旧版文档写，多出一个 8 字节的
+    `ProcessorTime` → 于是 `EVENT_TRACE` 变成 96（应为 88）、`EVENT_TRACE_LOGFILEW` 里
+    `CurrentEvent` 之后的所有字段整体后移 8 字节 → **回调指针被写到偏移 432，而 Windows
+    在 424 处取它**（当作 NULL）→ `ProcessTrace` 一次回调都没有，且不报任何错。
+
+    症状之所以难查：能自检的两个偏移（`LoggerName`=8、`ProcessTraceMode`=28）**都在
+    `CurrentEvent` 之前**，所以"会话建得起来、句柄有效、自检全绿"全都成立。
+    最终靠与成熟库 pywintrace 0.2.0 逐项对照偏移才定位（`_deploy/_qa/diff_layout.py`）。
+    """
+
     _fields_ = [
         ("Size", C.c_uint16),
         ("FieldTypeFlags", C.c_uint16),
@@ -146,7 +166,6 @@ class EventTraceHeader(C.Structure):
         ("ProcessId", C.c_uint32),
         ("TimeStamp", C.c_int64),
         ("Guid", GUID),
-        ("ProcessorTime", C.c_uint64),
         ("ClientContext", C.c_uint32),
         ("Flags", C.c_uint32),
     ]
@@ -242,20 +261,37 @@ class EventRecord(C.Structure):
     ]
 
 
-# 关键尺寸自检：对不上就说明我的字段列表有问题 —— **直接不启用 ETW**，绝不带着错误的布局去注册回调
+# 关键尺寸与偏移自检：对不上就说明我的字段列表有问题 —— **直接不启用 ETW**，绝不带着错误的布局去注册回调。
+#
+# 为什么现在连**偏移**也断言（而不只是 sizeof）：只断言 sizeof 曾放过一个致命错误 ——
+# `EVENT_TRACE` 多 8 字节时，`sizeof(EVENT_TRACE_LOGFILEW)` 从 448 变成 456 我看不懂，
+# 但 `EventRecordCallback` 从 424 漂到 432 是**一眼可判**的。右边这些基准值来自
+# pywintrace 0.2.0（FireEye 的成熟实现）的实际布局，逐项核对过（`_deploy/_qa/diff_layout.py`）。
 LAYOUT_OK = (
     C.sizeof(WnodeHeader) == 48
     and C.sizeof(EventTraceProperties) == 120
+    and C.sizeof(EventTraceHeader) == 48
+    and C.sizeof(EventTrace) == 88
     and C.sizeof(EventHeader) == 80
     and C.sizeof(EventRecord) == 112
+    and C.sizeof(EventTraceLogfileW) == 448
+    and EventTraceLogfileW.LoggerName.offset == 8
+    and EventTraceLogfileW.ProcessTraceMode.offset == 28
+    and EventTraceLogfileW.LogfileHeader.offset == 120
+    and EventTraceLogfileW.BufferCallback.offset == 400
+    and EventTraceLogfileW.EventRecordCallback.offset == 424
+    and EventTraceLogfileW.IsKernelTrace.offset == 432
+    and EventTraceLogfileW.Context.offset == 440
 )
 LAYOUT_DETAIL = {
     "sizeof(WnodeHeader)": C.sizeof(WnodeHeader),
     "sizeof(EVENT_TRACE_PROPERTIES)": C.sizeof(EventTraceProperties),
+    "sizeof(EVENT_TRACE_HEADER)": C.sizeof(EventTraceHeader),
+    "sizeof(EVENT_TRACE)": C.sizeof(EventTrace),
+    "sizeof(EVENT_TRACE_LOGFILEW)": C.sizeof(EventTraceLogfileW),
+    "offsetof(EventRecordCallback)": EventTraceLogfileW.EventRecordCallback.offset,
     "sizeof(EVENT_HEADER)": C.sizeof(EventHeader),
     "sizeof(EVENT_RECORD)": C.sizeof(EventRecord),
-    "offsetof(EventRecordCallback)": EventTraceLogfileW.EventRecordCallback.offset,
-    "sizeof(EVENT_TRACE_LOGFILEW)": C.sizeof(EventTraceLogfileW),
     "pointer_size": C.sizeof(C.c_void_p),
 }
 
@@ -437,7 +473,9 @@ class EtwConnTracker:
         props = C.cast(self._props_buffer, C.POINTER(EventTraceProperties)).contents
         props.Wnode.BufferSize = size                 # 必须等于整块缓冲区大小
         props.LogFileMode = EVENT_TRACE_REAL_TIME_MODE
-        props.Wnode.Flags = 0x00000002                # WNODE_FLAG_TRACED_GUID
+        # 0x00020000 = WNODE_FLAG_TRACED_GUID。**这里原来我写成 0x2**（那是 WNODE_FLAG_INSTANCE），
+        # 是与 pywintrace 对照时才发现的第二处错 —— 同样属于"不报错但语义不对"的错法。
+        props.Wnode.Flags = WNODE_FLAG_TRACED_GUID
         props.LoggerNameOffset = C.sizeof(EventTraceProperties)
         props.LogFileNameOffset = 0                   # 实时会话不落盘
         self._properties = props

@@ -401,12 +401,15 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("--db", default=str(HISTORY_DB), help="历史库路径（SQLite）")
     parser.add_argument("--retention-days", type=float, default=7.0, help="时间桶保留天数")
     parser.add_argument("--no-history", action="store_true", help="不落历史（纯实时模式）")
+    parser.add_argument("--etw", action="store_true",
+                        help="实时消费 ETW 补全归因（需管理员；非提权时如实降级为 denied，不影响实时链路）")
     args = parser.parse_args(argv)
 
     PORT = args.port
     FLUSH_INTERVAL = args.interval
     if args.dev:
         capturer.device = args.dev
+    capturer.use_etw = args.etw      # 必须在 lifespan 启动采集层之前设置（它在 Capturer.start 里生效）
     store.path = Path(args.db)
     store.retention_days = args.retention_days
     store.enabled = not args.no_history

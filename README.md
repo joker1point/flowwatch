@@ -138,8 +138,8 @@ device=\Device\NPF_{4FC5DA1D-...}  端点表 6299 个（刷新 203 ms）
 
 剩下的缺口是**结构性**的，调参补不了：生存期几十毫秒的 socket（本机实测是代理客户端的出站连接，
 一个请求一条连接）在 60 ms/次的表读面前必然漏掉 —— 把轮询提到 165 ms 也抓不到（`scripts/diag_race.py`）。
-要根治得换事件源：**ETW `Microsoft-Windows-Kernel-Network`**（连接建立时内核就带 PID 报事件），
-代价是 ctypes 打通 TDH 实时会话，量级数百行。
+根治只能换事件源：**ETW `Microsoft-Windows-Kernel-Network`**（连接建立时内核就带 PID 报事件）——
+已在 2026-09-17 打通，**根因、修法与证据**见《ETW 归因》一节（那一节里有我踩过的最贵的一个坑）。
 
 > 在那之前，这个数字**宁可如实标出来**，也不靠改口径把它藏进分母里。
 
@@ -170,10 +170,13 @@ IPv4 地址 4 字节、IPv6 16 字节，关键字 IPv4=0x10 / IPv6=0x20。
 
 ### 三条纪律（都是"不许误归因"的产物）
 
-1. **结构体不手算偏移**：全部按文档字段顺序用 ctypes 定义，让平台 ABI 决定 padding，并在导入时
-   断言关键尺寸 —— `WNODE_HEADER 48` / `EVENT_TRACE_PROPERTIES 120` / `EVENT_HEADER 80` /
-   `EVENT_RECORD 112`；断言不过就**根本不启用** ETW。ctypes 算出的 `EventRecordCallback` 偏移是
-   **432**，与按文档手推的一致（对建模的交叉验证）。
+1. **结构体不手算偏移，且尺寸与关键偏移都要断言**：全部按文档字段顺序用 ctypes 定义，让平台 ABI
+   决定 padding；导入时断言 `WNODE_HEADER 48` / `EVENT_TRACE_PROPERTIES 120` / `EVENT_TRACE 88` /
+   `EVENT_TRACE_LOGFILEW 448` / **`EventRecordCallback` 偏移 424** / `EVENT_HEADER 80` /
+   `EVENT_RECORD 112`；断言不过就**根本不启用** ETW。
+   > **基准必须来自独立参照物**（成熟库 / 官方头文件），不能来自我自己的推算。
+   > 我第一版只断言 sizeof，还把一个**错的偏移（432）**当成“与手推一致”的交叉验证写进了文档 ——
+   > 结果就是下面那次“自检全绿、却零回调”的连环撞墙。
 2. **fail-closed**：每条事件先过 sanity —— 本机侧地址必须**真属于本机**。若我把 `daddr`/`saddr`
    理解反了、或 IPv6 按 4 字节读了，这里必然失败，连续 5 次就停用 ETW 并写明原因，
    而不是把字节算到错误的进程头上。
@@ -184,7 +187,7 @@ IPv4 地址 4 字节、IPv6 16 字节，关键字 IPv4=0x10 / IPv6=0x20。
 > 拿到的是 5（拒绝访问）而不是 87/234（参数/长度错误），反过来说明 `EVENT_TRACE_PROPERTIES`
 > 缓冲区结构是健康的（Windows 先校验参数、后判权限）—— 这是非提权环境下能得到的间接证据。
 
-### 验证状态：**实时消费没打通**（六次提权实验的结论，不夸大）
+### 验证状态：**实时消费已打通**（2026-09-17 结案；根因不在会话、权限或环境）
 
 提权跑了 6 轮判别实验，逐层把责任面缩小到"我这一侧的消费端"：
 
@@ -196,16 +199,49 @@ IPv4 地址 4 字节、IPv6 16 字节，关键字 IPv4=0x10 / IPv6=0x20。
 | 4 | (mode 偏移 × 回调偏移) 网格 | 21 组组合**全部 0 次回调** ✗ → 也不是回调偏移 |
 | 5 | **绕过本层、用系统 `logman` 采同一 provider** | 9 秒采到 **73,981 条** Kernel-Network 事件（`tracerpt` 转 CSV 验证）✓✓ |
 | 6 | 挂到 `logman` 建的实时会话 | 仍 **0 次回调** ✗（自检显示交给 ETW 的字节正确：mode `0x10000100`、回调指针已写、句柄有效） |
+| 7 | **与成熟库 pywintrace 0.2.0 逐项对照结构体尺寸/偏移** | **一次撞出根因**（见下）✓✓ |
 
-**结论**：数据源、权限、会话创建、provider 启用全部正常 —— **本层的 `OpenTraceW` + `ProcessTrace` 实时消费拿不到事件**。
-所以本层当前**不产出任何归因**（fail-closed 设计保证它也不会误归因），未归因率仍由表归因 + 两层记忆承担。
+#### 根因：嵌套结构体多 8 字节，回调指针落在 Windows 不读的位置
+
+现代 SDK 的 `EVENT_TRACE_HEADER` **没有** `KernelTime`/`UserTime`（XP 时代 MOF 版本才有），
+我照旧文档多写了一个 8 字节字段，于是：
+
+```
+EVENT_TRACE_HEADER  我 56 字节   /  参照物 48   →  EVENT_TRACE 我 96 / 应 88
+  → EVENT_TRACE_LOGFILEW 里 CurrentEvent 之后的字段**整体后移 8 字节**
+  → 回调指针写到偏移 432，而 Windows 在 424 处取它（视为 NULL）
+  → ProcessTrace 静默零回调：既没有错误码，也没有事件
+```
+
+第二处错同时修掉：`Wnode.Flags` 我写成 `0x2`（那是 `WNODE_FLAG_INSTANCE`），
+正确的 `WNODE_FLAG_TRACED_GUID = 0x20000`。
+
+**为什么连撞 6 次墙**：我自检里能看的那两个偏移（`LoggerName`=8、`ProcessTraceMode`=28）
+**都在 `CurrentEvent` 之前** —— 于是"会话建得起来、句柄有效、自检全绿"三件事同时成立，
+唯独没有一处检查回调指针的落点；我甚至把一个**错的 432** 当成"与手推一致"的验证写进了文档。
+
+**修完后的提权实测**（`scripts/etw_realtime_check.py`，同一进程内跑两条实现 + 受控延迟）：
+
+```
+【0】布局对照（基准 pywintrace 0.2.0）：EVENT_TRACE_HEADER 48/48 · EVENT_TRACE 88/88 ·
+     EVENT_TRACE_LOGFILE 448/448 · EventRecordCallback 偏移 424/424            → 全部一致
+【1】pywintrace 基线 10s：85 条事件 {12:13, 13:63, 15:9}                        → 环境/provider/权限正常
+【2】flowwatch 实现 10s：state=running events=60 learned=17 forgotten=43 sanity_failures=0
+     10.44.99.5:51953 -> 61.151.230.245:47873  归因 PID=23968                 → 真正收到并归因
+```
+
+`sanity_failures=0` 值得单独说：那条校验要求"本机侧地址必须真属于本机"，它零失败意味着
+**载荷字段顺序（`daddr` 在前、`saddr` 在后）与地址宽度也都是对的** ——
+fail-closed 的判据在这里正好变成正面证据。
 
 - ✅ **解析层**：`tests/test_etw.py` 覆盖 IPv4/IPv6、connect/accept/disconnect、截断载荷、PID/端口非法值，
-  以及"`daddr`/`saddr` 反了能否被 sanity 抓住" —— 全绿
-- ✅ **布局**：尺寸断言 + 偏移交叉验证（`EventRecordCallback` 偏移 432，与按文档手推一致）
-- ✅ **启用方式**：按实验结果改为 `EnableTraceEx2`（代码注释里写明了 87 的来源）
+  以及"`daddr`/`saddr` 反了能否被 sanity 抓住" —— 全绿（尺寸/偏移断言改动后复测仍全绿）
+- ✅ **布局**：尺寸 + **关键偏移**断言，基准值取自 pywintrace 的实际布局（不再用我自己的推算）
+- ✅ **启用方式**：按实验结果用 `EnableTraceEx2`（代码注释里写明了 87 的来源）
 - ✅ **降级路径**：非提权 `state="denied"`（Win32 `error_code=5`），主链路不受影响
-- ❌ **实时消费**：未打通（见上表），诊断脚本都在 `scripts/etw_probe_*.py`，每个都写明"它证明/排除了什么"
+- ✅ **实时消费**：已打通（证据见上），`scripts/etw_realtime_check.py` 可随时复跑
+- ⏳ **净收益测量**：`scripts/etw_benefit_measure.py` 已备好 —— 提权下两阶段对照（先"提权但不带 ETW"、
+  再"提权 + ETW"，唯一变量是 ETW 本身），等一次提权运行出数
 
 ### 批量路线：已实现，但它救不了那 30%（把结论写清楚，免得自欺）
 
@@ -217,11 +253,11 @@ IPv4 地址 4 字节、IPv6 16 字节，关键字 IPv4=0x10 / IPv6=0x20。
 
 **然而它救不了短命 socket**：3 秒窗口 + 转换 ≈ 3–6 秒延迟，而短命 socket 的包在几十毫秒内就飞完了 ——
 等学到 PID，那些包早已计入未归因。所以它的定位是**取证/补充**（回答"某个时点这个 IP:端口 属于谁"），
-不是那 30% 的解法。**两条 ETW 路线默认都关闭**（`--etw` 实验性 / `--etw-batch` opt-in），
-不为一个交付不了价值的增强功能白烧 CPU 与磁盘 —— 默认值也是按证据定的。
+不是那 30% 的解法。
 
-**真正的下一步**：用成熟库（`pywintrace` / `krabsetw`）对照，确认是 ctypes 用法问题还是环境差异，
-把实时消费打通（那才是短命 socket 的唯一正解）。
+**两条路线现在的分工**：实时（`--etw`，需管理员）是**唯一能补短命 socket 的路**；
+批量（`--etw-batch`）是取证/补充。两者默认都关闭 —— 默认值按证据定：
+实时路线需要权限，而"该不该常开"应由 `scripts/etw_benefit_measure.py` 测出的差值决定，不由手感决定。
 
 ## 域名解析：把 IP 变回人看得懂的名字
 
@@ -319,9 +355,11 @@ README 里的每个数字都有对应脚本，**不需要 pytest、不需要网�
 | `scripts/etw_probe_logman.py` | 绕过本层用系统 `logman` 采同一 provider：9 秒 73981 条事件，证明数据源与权限正常 |
 | `scripts/etw_probe_attach.py` | 挂到 `logman` 建的实时会话：本层仍 0 回调（附带自检：交给 ETW 的字节是正确的） |
 | `scripts/etw_batch_measure.py` | 批量路线可行性测量：XML 体积/解析速度、信噪比（连接事件占 0.58%）、字段完整性 |
+| `scripts/etw_realtime_check.py` | **实时路线对照检查**：与 pywintrace 逐项比结构体尺寸/偏移 → 两条实现各收 10 秒事件 → 受控 loopback 连接测归因延迟（需管理员；参照库 `pip install pywintrace` 可选，没装则跳过前两步） |
+| `scripts/etw_benefit_measure.py` | **ETW 净收益测量**：提权下两阶段对照（提权基线 vs 提权 + `--etw`），输出未归因率/属主受限字节的差值（需管理员） |
 
-> 后四个需要**管理员**运行（创建 ETW 会话的硬性要求），可用通用启动器：
-> `powershell -NoProfile -ExecutionPolicy Bypass -File scripts/run_elevated.ps1 scripts/etw_probe_logman.py`
+> ETW 相关脚本需要**管理员**运行（创建 ETW 会话的硬性要求），用通用启动器：
+> `powershell -NoProfile -ExecutionPolicy Bypass -File scripts/run_elevated.ps1 scripts/etw_realtime_check.py`
 
 ```bash
 python tests/test_names.py            # 三份单测，随时可跑

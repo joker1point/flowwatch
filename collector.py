@@ -666,10 +666,14 @@ class Capturer:
         self.conn_memory = ConnMemory()      # 四元组 → PID：端点表丢失时的兜底
         self.refresh_error: str | None = None   # 刷新级抖动（下次成功即清除），与致命 error 分开
         # ETW 归因（增强层）。两条路线都实现过、都实测过，结论如下（详见两个模块头部）：
-        #   · etw.py       实时消费（OpenTraceW + ProcessTrace）：六轮提权实验判定**未打通**，保留为实验性开关；
+        #   · etw.py       实时消费（OpenTraceW + ProcessTrace）：**2026-09-17 修好并实测通过** ——
+        #                  根因是 EVENT_TRACE_HEADER 多 8 字节导致回调指针偏移错位（零回调），
+        #                  靠与成熟库 pywintrace 逐项对照结构体布局定位。需要管理员；
+        #                  非提权时如实降级为 denied（会话建不起来，主链路不受影响）。
         #   · etw_batch.py 批量路线（logman + tracerpt）：可用，但窗口 3 秒 → 学到 PID 时短命 socket
         #                  早已结束，**救不了那 30%**，只对"窗口内仍存活"的连接有补充意义。
-        # 所以两者**默认都关闭** —— 不为一个交付不了价值的增强功能白烧 CPU 和磁盘。
+        # 两者当前都**默认关闭**：实时路线需要管理员，且"该不该常开"应由实测收益决定
+        # （见 README《归因质量》里的测量：开 ETW 前后未归因率与属主受限字节的对比）。
         self.etw = etw.EtwConnTracker(self.conn_memory, lambda: self.local_ips)
         self.etw_batch = etw_batch.EtwBatchTracker(
             self.conn_memory, lambda: self.local_ips, run_dir=Path(__file__).resolve().parent / "_run")
@@ -1010,7 +1014,7 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("--no-loopback", action="store_true", help="不额外抓回环设备")
     parser.add_argument("--diag", action="store_true", help="每个窗口打印未归因明细与分类计数")
     parser.add_argument("--etw", action="store_true",
-                        help="实验性：实时消费 ETW（六轮实验判定未打通，见 etw.py 头部）")
+                        help="实时消费 ETW 补全归因（需管理员；修复见 etw.py 头部 2026-09-17 结案说明）")
     parser.add_argument("--etw-batch", action="store_true",
                         help="批量路线：logman + tracerpt 补全连接归属（需管理员，窗口 3 秒，救不了短命 socket）")
     args = parser.parse_args(argv)

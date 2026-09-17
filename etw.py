@@ -75,6 +75,8 @@ EVENT_CONTROL_CODE_ENABLE_PROVIDER = 1
 TRACE_LEVEL_INFORMATION = 4
 ERROR_SUCCESS = 0
 ERROR_MORE_DATA = 234
+ERROR_ALREADY_EXISTS = 183
+EVENT_TRACE_CONTROL_STOP = 1
 
 SANITY_FAIL_LIMIT = 5      # 连续这么多条事件过不了 sanity 就停用（宁可不用，不许误归因）
 
@@ -416,6 +418,16 @@ class EtwConnTracker:
 
         props = self._make_properties()
         started = self._lib.StartTraceW(C.byref(self._session), self.session_name, props)
+        if started == ERROR_ALREADY_EXISTS:
+            # 上一次进程被强杀时（terminate 不给 stop() 机会）**ETW 会话会在创建者死后活下来**，
+            # 于是下次启动必撞 183 —— 实测撞到过，且症状很隐蔽：整个实时路线静默失效，
+            # health 里只留一行 'StartTraceW 失败: 183'。处置：停掉遗留会话再重建（自愈）。
+            stale = self._lib.ControlTraceW(C.c_uint64(0), self.session_name, props,
+                                            EVENT_TRACE_CONTROL_STOP)
+            self.detail = f"同名遗留会话已停掉（ControlTrace={stale}），正在重建"
+            props = self._make_properties()     # ControlTrace 会回写 properties 缓冲区，重建一份
+            time.sleep(0.3)
+            started = self._lib.StartTraceW(C.byref(self._session), self.session_name, props)
         if started != ERROR_SUCCESS:
             self._explain_start_failure(started)
             return
@@ -458,6 +470,10 @@ class EtwConnTracker:
         if code == 5:
             self.state = "denied"
             self.detail = "创建 ETW 会话需要管理员（或 Performance Log Users 组成员）—— 保持表归因，不影响实时链路"
+        elif code == ERROR_ALREADY_EXISTS:
+            self.state = "failed"
+            self.detail = ("同名 ETW 会话已存在，且停掉后重建仍失败 —— 可能被别的进程占着"
+                           "（用 `logman query -ets` 看，`logman stop <名字> -ets` 清）")
         elif code in (87, ERROR_MORE_DATA):
             self.state = "layout_mismatch"
             self.detail = f"StartTraceW 返回 {code}，EVENT_TRACE_PROPERTIES 布局可疑: {LAYOUT_DETAIL}"

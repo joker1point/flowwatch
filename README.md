@@ -207,9 +207,21 @@ IPv4 地址 4 字节、IPv6 16 字节，关键字 IPv4=0x10 / IPv6=0x20。
 - ✅ **降级路径**：非提权 `state="denied"`（Win32 `error_code=5`），主链路不受影响
 - ❌ **实时消费**：未打通（见上表），诊断脚本都在 `scripts/etw_probe_*.py`，每个都写明"它证明/排除了什么"
 
-**下一步（不必再靠猜）**：① 用成熟库（`pywintrace` / `krabsetw`）验证是 ctypes 用法问题还是环境差异；
-② 走**已被实验证明可用**的批量路线 —— `logman` 短周期采 ETL + `tracerpt` 解析，延迟 1–3 秒，
-够用来把短命连接的归属补上（本工具的窗口是 1 秒，可接受）。
+### 批量路线：已实现，但它救不了那 30%（把结论写清楚，免得自欺）
+
+既然 `logman` 已证明可用，就把它实现成第二条路（`etw_batch.py`，开关 `--etw-batch`）：
+`logman` 采 ETL（默认 3 秒窗口）→ `tracerpt` 转 XML → 解析 connect/accept/disconnect → 喂四元组记忆。
+实测数据（本机 9 秒、有真实流量）：ETL 8.1 MB → XML 105.9 MB、`tracerpt` 2.05 秒；
+但 **XML 解析只要 0.28 秒（377 MB/s）**，且只关心 **0.58%** 的连接事件，字段齐全
+（`PID=112368 · daddr · saddr · dport · sport`，顺带印证了按官方清单写的字段顺序）。
+
+**然而它救不了短命 socket**：3 秒窗口 + 转换 ≈ 3–6 秒延迟，而短命 socket 的包在几十毫秒内就飞完了 ——
+等学到 PID，那些包早已计入未归因。所以它的定位是**取证/补充**（回答"某个时点这个 IP:端口 属于谁"），
+不是那 30% 的解法。**两条 ETW 路线默认都关闭**（`--etw` 实验性 / `--etw-batch` opt-in），
+不为一个交付不了价值的增强功能白烧 CPU 与磁盘 —— 默认值也是按证据定的。
+
+**真正的下一步**：用成熟库（`pywintrace` / `krabsetw`）对照，确认是 ctypes 用法问题还是环境差异，
+把实时消费打通（那才是短命 socket 的唯一正解）。
 
 ## 域名解析：把 IP 变回人看得懂的名字
 
@@ -292,6 +304,7 @@ README 里的每个数字都有对应脚本，**不需要 pytest、不需要网�
 | `tests/test_names.py` | 域名解析层：DNS 压缩指针、各类畸形包（含指针自指不死循环）、TLS SNI、缓存 TTL 与上限（18 项） |
 | `tests/test_domain_history.py` | 历史层域名聚合：同桶累计、排序、`named_only` 过滤、时间窗口边界（9 项） |
 | `tests/test_etw.py` | ETW：结构体尺寸断言、载荷解析（IPv4/IPv6 × connect/accept/disconnect × 截断/非法值）、sanity 校验、非提权降级路径 |
+| `tests/test_etw_batch.py` | 批量路线解析层：从 tracerpt 的 XML 里抽连接事件（含**真实 dump 片段**钉字段语义、干扰事件筛选、畸形输入丢弃） |
 | `scripts/bench_table.py` | 连接表读取基准（现状 vs `array` 批量解析）—— 支撑"解析优化只有 1.6×、10 Hz 要 36% 单核"的结论 |
 | `scripts/diag_miss.py` | 给 `pid_of` 插桩，统计未命中的**原因分布**（"表里没有这个端口"占比多少） |
 | `scripts/diag_race.py` | 100 ms 高频轮询判别：未归因的那些本地端口"到底存在过吗" |
@@ -305,6 +318,7 @@ README 里的每个数字都有对应脚本，**不需要 pytest、不需要网�
 | `scripts/etw_probe_offsets.py` | ETW 回调偏移网格搜索：21 组 (mode × 回调) 组合全部 0 回调，排除"偏移写错" |
 | `scripts/etw_probe_logman.py` | 绕过本层用系统 `logman` 采同一 provider：9 秒 73981 条事件，证明数据源与权限正常 |
 | `scripts/etw_probe_attach.py` | 挂到 `logman` 建的实时会话：本层仍 0 回调（附带自检：交给 ETW 的字节是正确的） |
+| `scripts/etw_batch_measure.py` | 批量路线可行性测量：XML 体积/解析速度、信噪比（连接事件占 0.58%）、字段完整性 |
 
 > 后四个需要**管理员**运行（创建 ETW 会话的硬性要求），可用通用启动器：
 > `powershell -NoProfile -ExecutionPolicy Bypass -File scripts/run_elevated.ps1 scripts/etw_probe_logman.py`

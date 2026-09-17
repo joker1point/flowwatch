@@ -289,7 +289,8 @@ def health() -> dict[str, Any]:
         "memory_hits": capturer.conn_memory.hits,             # 四元组记忆救回次数
         "history": store.stats(),
         "names": capturer.resolver.stats(),
-        "etw": capturer.etw.stats(),          # 增强归因层状态（denied/running/sanity_failed…）
+        "etw": capturer.etw.stats(),          # 实时路线状态（实验性，默认关闭）
+        "etw_batch": capturer.etw_batch.stats(),  # 批量路线状态（opt-in，需管理员）
         "ts": datetime.now().isoformat(timespec="seconds"),
     }
 

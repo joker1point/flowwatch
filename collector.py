@@ -31,6 +31,7 @@ from __future__ import annotations
 import argparse
 import ctypes as C
 import etw
+import etw_batch
 import names
 import socket
 import struct
@@ -38,6 +39,7 @@ import sys
 import threading
 import time
 from collections import defaultdict, deque
+from pathlib import Path
 from typing import Any
 
 import psutil
@@ -663,10 +665,16 @@ class Capturer:
         self.local_ips: set[str] = set()     # 本机接口地址：判定"这段流量是不是这台机器的"
         self.conn_memory = ConnMemory()      # 四元组 → PID：端点表丢失时的兜底
         self.refresh_error: str | None = None   # 刷新级抖动（下次成功即清除），与致命 error 分开
-        # ETW 归因（增强层）：连接建立那一刻就带 PID，专治短命 socket。
-        # 非提权/无权限时自动降级为"只记状态"，绝不误归因（见 etw.py 的三条纪律）。
+        # ETW 归因（增强层）。两条路线都实现过、都实测过，结论如下（详见两个模块头部）：
+        #   · etw.py       实时消费（OpenTraceW + ProcessTrace）：六轮提权实验判定**未打通**，保留为实验性开关；
+        #   · etw_batch.py 批量路线（logman + tracerpt）：可用，但窗口 3 秒 → 学到 PID 时短命 socket
+        #                  早已结束，**救不了那 30%**，只对"窗口内仍存活"的连接有补充意义。
+        # 所以两者**默认都关闭** —— 不为一个交付不了价值的增强功能白烧 CPU 和磁盘。
         self.etw = etw.EtwConnTracker(self.conn_memory, lambda: self.local_ips)
-        self.use_etw = True
+        self.etw_batch = etw_batch.EtwBatchTracker(
+            self.conn_memory, lambda: self.local_ips, run_dir=Path(__file__).resolve().parent / "_run")
+        self.use_etw = False
+        self.use_etw_batch = False
         self.error: str | None = None
         self.device_name: str = ""
         self._handles: list[PcapHandle] = []
@@ -756,14 +764,17 @@ class Capturer:
         refresher.start()
         self._threads.append(refresher)
         if self.use_etw:
-            self.etw.start()          # 增强层：失败只记录状态，不影响抓包与表归因
+            self.etw.start()          # 实验性（见头部结论）：失败只记录状态，不影响抓包
+        if self.use_etw_batch:
+            self.etw_batch.start()    # 批量路线（需要管理员；opt-in）
 
     def stop(self) -> None:
         self._stop.set()
-        try:
-            self.etw.stop()
-        except Exception:
-            pass
+        for tracker in (self.etw, self.etw_batch):
+            try:
+                tracker.stop()
+            except Exception:
+                pass
         for thread in self._threads:
             thread.join(timeout=2.0)
         for handle in self._handles:
@@ -998,7 +1009,10 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("--top", type=int, default=8, help="显示前 N 个进程")
     parser.add_argument("--no-loopback", action="store_true", help="不额外抓回环设备")
     parser.add_argument("--diag", action="store_true", help="每个窗口打印未归因明细与分类计数")
-    parser.add_argument("--no-etw", action="store_true", help="不用 ETW 增强归因（默认尝试，失败自动降级）")
+    parser.add_argument("--etw", action="store_true",
+                        help="实验性：实时消费 ETW（六轮实验判定未打通，见 etw.py 头部）")
+    parser.add_argument("--etw-batch", action="store_true",
+                        help="批量路线：logman + tracerpt 补全连接归属（需管理员，窗口 3 秒，救不了短命 socket）")
     args = parser.parse_args(argv)
 
     pcap = Pcap()
@@ -1008,7 +1022,8 @@ def main(argv: list[str] | None = None) -> int:
         return 0
 
     capturer = Capturer(device=args.dev, include_loopback=not args.no_loopback)
-    capturer.use_etw = not args.no_etw
+    capturer.use_etw = args.etw
+    capturer.use_etw_batch = args.etw_batch
     try:
         capturer.start()
     except PcapError as exc:
@@ -1042,10 +1057,13 @@ def main(argv: list[str] | None = None) -> int:
           f" · 非 TCP-UDP 或头部不全 {stats['skipped_packets']} 包")
     print(f"归因兜底: 端点短时记忆命中 {capturer.index.sticky_hits} 次 / "
           f"四元组记忆命中 {capturer.conn_memory.hits} 次")
-    etw_stats = capturer.etw.stats()
-    print(f"ETW 归因: {etw_stats['state']} · 事件 {etw_stats['events']} 条 / 学到连接 {etw_stats['learned']} 个"
-          f" / 忘掉 {etw_stats['forgotten']} 个 / sanity 失败 {etw_stats['sanity_failures']}"
-          + (f" —— {etw_stats['detail']}" if etw_stats["detail"] else ""))
+    realtime = capturer.etw.stats()
+    batch = capturer.etw_batch.stats()
+    print(f"ETW 实时路线（默认关闭，--etw 开启）: {realtime['state']}"
+          + (f" —— {realtime['detail']}" if realtime["detail"] else ""))
+    print(f"ETW 批量路线（默认关闭，--etw-batch 开启）: {batch['state']} · {batch['rounds']} 轮"
+          f" / 学到 {batch['learned']} · 忘掉 {batch['forgotten']} · 均值 {batch['last_round_ms']:.0f} ms/轮"
+          + (f" —— {batch['detail']}" if batch["detail"] else ""))
     domain = capturer.resolver.stats()
     print(f"域名解析: DNS 记录 {domain['dns_records']} 条 / SNI {domain['sni_records']} 条 · "
           f"已知 IP {domain['ips_known']} 个 / 端点 {domain['endpoints_known']} 个 · "

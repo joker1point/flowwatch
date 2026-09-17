@@ -956,8 +956,11 @@ class Capturer:
                 agg.add(pid, f"{dst_ip}:{dport}" if src_local else f"{src_ip}:{sport}",
                         src_local, length)
                 return
+            # 协议要写进未归因明细：否则"未归因 20%"里到底是 TCP 还是 UDP 说不清，
+            # 而两者的可归因性完全不同（TCP 有 connect/accept 事件，UDP 只有逐数据报事件）。
+            proto_name = {IPPROTO_TCP: "tcp", IPPROTO_UDP: "udp"}.get(proto, f"proto{proto}")
             agg.add_unattributed(
-                f"{src_ip}:{sport} → {dst_ip}:{dport}",
+                f"{proto_name} {src_ip}:{sport} → {dst_ip}:{dport}",
                 is_out=src_local or not dst_local,
                 length=length,
             )

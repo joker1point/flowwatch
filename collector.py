@@ -167,6 +167,16 @@ class PcapHandle:
 _IP_CACHE: dict[bytes, str] = {}
 
 
+def _flags_text(flags: int) -> str:
+    """TCP 标志位 → 简短文本（S 握手 / A 确认 / P 数据 / R 复位 / F 结束）。
+
+    用途：把未归因流归到"握手 / 数据 / 拆除"某一阶段 —— 这是回答
+    "这些 TCP 端口为什么从不出现在连接表里"的关键判据。
+    """
+    return "".join(letter for bit, letter in ((0x02, "S"), (0x10, "A"), (0x08, "P"),
+                                               (0x04, "R"), (0x01, "F")) if flags & bit)
+
+
 def _ip_text_v4(raw: bytes) -> str:
     """4 字节 → 点分十进制。带缓存：抓包热路径上同一个 IP 会反复出现。"""
     text = _IP_CACHE.get(raw)
@@ -494,7 +504,7 @@ class FlowAggregator:
         self._unknown_packets = 0
         self._unknown_out = 0
         self._unknown_in = 0
-        self._unknown_flows: dict[str, list[int]] = {}
+        self._unknown_flows: dict[str, list] = {}   # [out, in, packets, {标志位集合}]
         self._foreign_win_bytes = 0
         self._foreign_win_packets = 0
         self._skipped_win = 0
@@ -523,8 +533,12 @@ class FlowAggregator:
                 pair = slot["conns"][remote]
                 pair[0 if is_out else 1] += length
 
-    def add_unattributed(self, flow: str, is_out: bool, length: int) -> None:
-        """有包但查不到 PID。**必须记明细**：只说"未归因 35%"没法改进，得知道是哪条流。"""
+    def add_unattributed(self, flow: str, is_out: bool, length: int,
+                         flags: int | None = None) -> None:
+        """有包但查不到 PID。**必须记明细**：只说"未归因 35%"没法改进，得知道是哪条流。
+
+        flags 是 TCP 标志位（诊断用）：把每条未归因流归到"握手 / 数据 / 拆除"某一阶段。
+        """
         with self._lock:
             self.packets += 1
             self.bytes_total += length
@@ -537,11 +551,13 @@ class FlowAggregator:
             slot = self._unknown_flows.get(flow)
             if slot is None:
                 if len(self._unknown_flows) >= self.UNKNOWN_FLOW_LIMIT:
-                    slot = self._unknown_flows.setdefault("(长尾其他)", [0, 0, 0])
+                    slot = self._unknown_flows.setdefault("(长尾其他)", [0, 0, 0, set()])
                 else:
-                    slot = self._unknown_flows[flow] = [0, 0, 0]
+                    slot = self._unknown_flows[flow] = [0, 0, 0, set()]
             slot[0 if is_out else 1] += length
             slot[2] += 1
+            if flags is not None:
+                slot[3].add(_flags_text(flags))
 
     def add_foreign(self, length: int) -> None:
         """两端都不是本机地址：属于**别人的流量**，既不算归因成功也不算归因失败。
@@ -628,7 +644,8 @@ class FlowAggregator:
             unknown_bytes, unknown_packets = self._unknown_bytes, self._unknown_packets
             flows = sorted(
                 (
-                    {"flow": flow, "out_bytes": item[0], "in_bytes": item[1], "packets": item[2]}
+                    {"flow": flow, "out_bytes": item[0], "in_bytes": item[1], "packets": item[2],
+                     "signs": "".join(sorted(item[3])) if len(item) > 3 and item[3] else ""}
                     for flow, item in self._unknown_flows.items()
                 ),
                 key=lambda entry: entry["out_bytes"] + entry["in_bytes"],
@@ -922,6 +939,8 @@ class Capturer:
                 return
             sport, dport = struct.unpack_from("!HH", frame, l4)
             length = len(frame)
+            # TCP 标志位（未归因诊断用：判断这条流处于握手/数据/拆除的哪一阶段）
+            tcp_flags = frame[l4 + 13] if (proto == IPPROTO_TCP and len(frame) >= l4 + 14) else None
 
             src_local = src_ip in self.local_ips
             dst_local = dst_ip in self.local_ips
@@ -963,6 +982,7 @@ class Capturer:
                 f"{proto_name} {src_ip}:{sport} → {dst_ip}:{dport}",
                 is_out=src_local or not dst_local,
                 length=length,
+                flags=tcp_flags,
             )
         except (struct.error, ValueError):
             agg.parse_errors += 1

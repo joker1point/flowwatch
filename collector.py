@@ -32,6 +32,7 @@ import argparse
 import ctypes as C
 import etw
 import etw_batch
+import logging
 import names
 import socket
 import struct
@@ -45,6 +46,8 @@ from typing import Any
 import psutil
 
 SCHEMA = "flowwatch/v1"
+
+logger = logging.getLogger("flowwatch.collector")
 
 # ---------------------------------------------------------------- 常量
 SNAPLEN = 2048           # 只看包头（隐私 + 性能）：IPv4/IPv6 + TCP/UDP 头都在前 128 字节内
@@ -760,7 +763,19 @@ class Capturer:
         self.device_name: str = ""
         self._handles: list[PcapHandle] = []
         self._stop = threading.Event()
-        self._threads: list[threading.Thread] = []
+        self._threads: list[threading.Thread] = []          # 辅助线程（端点刷新 / 看门狗）
+        self._capture_threads: list[threading.Thread] = []  # 抓包线程（看门狗重开时只换这一组）
+        self._capture_stops: list[threading.Event] = []     # 每句柄一个停止信号
+        # ---- 采集看门狗：Npcap 句柄「静默失效」的自愈 ----
+        # 实测事故（2026-09-17）：网卡重连后句柄不报错、不退出、也不再产出包，
+        # 采集静默停摆而 health 全绿。看门狗检测「久无包」并按当前设备重开抓包。
+        self.last_packet_ts: float = 0.0                    # 最后一次收到包的墙钟时刻
+        self.watchdog_enabled = True
+        self.watchdog_stale_seconds = 180.0                 # 无包超过此时长 → 判静默
+        self.watchdog_min_reopen_interval = 300.0           # 两次重开最小间隔（防抖）
+        self.reopen_count = 0
+        self.last_reopen_ts = 0.0
+        self.last_reopen_error = ""
 
     # ---- 本机地址
     def refresh_local_ips(self) -> None:
@@ -829,21 +844,22 @@ class Capturer:
 
     # ---- 生命周期
     def start(self) -> None:
+        self._stop.clear()            # 支持「停止后再启动」与看门狗重开
+        self._threads = []
         devices = self.pick_devices()
         self.index.refresh()
         self.refresh_local_ips()
-        for device in devices:
-            self._handles.append(self.pcap.open(device))
+        self._open_and_capture(devices)
         self.device_name = ", ".join(devices)
+        self.last_packet_ts = time.time()   # 起点：给选设备与首包留出宽限
 
-        for handle in self._handles:
-            thread = threading.Thread(target=self._capture_loop, args=(handle,),
-                                      name="flowwatch-capture", daemon=True)
-            thread.start()
-            self._threads.append(thread)
         refresher = threading.Thread(target=self._refresh_loop, name="flowwatch-endpoints", daemon=True)
         refresher.start()
         self._threads.append(refresher)
+        if self.watchdog_enabled:
+            watchdog = threading.Thread(target=self._watchdog_loop, name="flowwatch-watchdog", daemon=True)
+            watchdog.start()
+            self._threads.append(watchdog)
         if self.use_etw:
             if self.use_etw_udp:
                 self.etw.enable_udp = True   # 见 etw.py 头部：UDP 事件内容不齐，默认关
@@ -851,18 +867,97 @@ class Capturer:
         if self.use_etw_batch:
             self.etw_batch.start()    # 批量路线（需要管理员；opt-in）
 
+    def _open_and_capture(self, devices: list[str]) -> None:
+        """打开句柄并起抓包线程（start 与看门狗重开共用）。"""
+        self._handles = []
+        self._capture_threads = []
+        self._capture_stops = []
+        for device in devices:
+            handle = self.pcap.open(device)
+            self._handles.append(handle)
+            stop_ev = threading.Event()
+            thread = threading.Thread(target=self._capture_loop, args=(handle, stop_ev),
+                                      name="flowwatch-capture", daemon=True)
+            thread.start()
+            self._capture_threads.append(thread)
+            self._capture_stops.append(stop_ev)
+
     def stop(self) -> None:
         self._stop.set()
+        for stop_ev in self._capture_stops:
+            stop_ev.set()
         for tracker in (self.etw, self.etw_batch):
             try:
                 tracker.stop()
             except Exception:
                 pass
-        for thread in self._threads:
+        for thread in self._threads + self._capture_threads:
             thread.join(timeout=2.0)
         for handle in self._handles:
-            handle.close()
+            try:
+                handle.close()
+            except Exception:
+                pass
         self._handles.clear()
+        self._capture_threads = []
+        self._capture_stops = []
+
+    # ---- 看门狗：句柄「静默失效」自愈
+    def _watchdog_loop(self) -> None:
+        """检测「句柄活着但不再产包」的静默失效，并按当前设备重开抓包。
+
+        为什么需要：Npcap 句柄在网络重连 / 网卡状态变化后会静默失效——不报错、
+        不退出、也不再产出包（2026-09-17 实测：采集停摆、health 全绿）。
+        代价控制：无包 180s 才判静默；两次重开至少隔 300s——最坏情况只是短暂重开。
+        """
+        while not self._stop.wait(30.0):
+            now = time.time()
+            if not self.last_packet_ts:
+                continue
+            if now - self.last_packet_ts < self.watchdog_stale_seconds:
+                continue
+            if now - self.last_reopen_ts < self.watchdog_min_reopen_interval:
+                continue
+            self._restart_capture()
+
+    def _restart_capture(self) -> None:
+        """重开抓包句柄（重新选设备，顺带适配网卡切换）。失败只记录，不影响服务。"""
+        self.reopen_count += 1
+        self.last_reopen_ts = time.time()
+        try:
+            for stop_ev in self._capture_stops:
+                stop_ev.set()
+            for thread in self._capture_threads:
+                thread.join(timeout=2.0)
+            for handle in self._handles:
+                try:
+                    handle.close()
+                except Exception:
+                    pass
+            devices = self.pick_devices()
+            self.index.refresh()
+            self.refresh_local_ips()
+            self._open_and_capture(devices)
+            self.device_name = ", ".join(devices)
+            self.last_packet_ts = time.time()     # 重置基准，给新句柄留宽限
+            self.last_reopen_error = ""
+            logger.info("看门狗：静默失效已恢复（第 %d 次重开），设备: %s",
+                        self.reopen_count, self.device_name)
+        except Exception as exc:                  # PcapError 等：记录待下次再试
+            self.last_reopen_error = f"{type(exc).__name__}: {exc}"
+            logger.warning("看门狗重开失败: %s", exc)
+
+    def watchdog_stats(self) -> dict:
+        now = time.time()
+        return {
+            "enabled": self.watchdog_enabled,
+            "stale_threshold_seconds": self.watchdog_stale_seconds,
+            "seconds_since_last_packet": (round(now - self.last_packet_ts, 1)
+                                          if self.last_packet_ts else None),
+            "reopen_count": self.reopen_count,
+            "last_reopen_ts": self.last_reopen_ts or None,
+            "last_reopen_error": self.last_reopen_error,
+        }
 
     def _refresh_loop(self) -> None:
         """自适应刷新：未归因高说明连接在快速生灭（实测短命 socket 是主要缺口），
@@ -885,16 +980,19 @@ class Capturer:
             else:
                 self.refresh_error = None
 
-    def _capture_loop(self, handle: PcapHandle) -> None:
-        while not self._stop.is_set():
+    def _capture_loop(self, handle: PcapHandle, stop_ev: threading.Event) -> None:
+        while not (self._stop.is_set() or stop_ev.is_set()):
             try:
                 item = handle.read()
             except Exception as exc:  # 设备被拔掉等：如实记录，退出该线程
+                if self._stop.is_set() or stop_ev.is_set():
+                    return                # 正常关闭 / 看门狗重开：不算错误
                 self.error = f"抓包异常: {exc}"
                 return
             if item is None:
                 continue
             frame, _ts = item
+            self.last_packet_ts = time.time()   # 看门狗与 health 共用（time.time ≈ 50ns，热路径可接受）
             self._handle_frame(frame)
 
     # ---- 包解析（只读头部，不落包体）

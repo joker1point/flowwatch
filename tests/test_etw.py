@@ -97,7 +97,7 @@ foreign = etw.parse_connection(payload_v4(9, "93.184.216.34", "8.8.8.8", 443, 50
 check("本机地址不属于本机 → 被抓住", etw.sane(foreign, local), False)
 
 # ---------------------------------------------------------------- 4. 降级路径（非提权）
-print("\n=== 降级路径（当前 shell 非提权，应得到 denied 或 failed，而不是异常）===")
+print("\n=== 降级/提权路径（非提权应 denied/failed；管理员可能真的起会话，都不该抛异常）===")
 tracker = etw.EtwConnTracker(conn_memory=None, local_ips_provider=lambda: local, session_name="flowwatch-etw-test")
 started = tracker.start()
 import time  # noqa: E402
@@ -109,7 +109,10 @@ for _ in range(30):
 tracker.stop()
 stats = tracker.stats()
 print(f"        state={stats['state']} detail={stats['detail']} error_code={tracker.error_code}")
-check("状态被如实记录（denied / failed，不是异常）", stats["state"] in ("denied", "failed", "running"), True)
+# CI 的 windows runner 默认是管理员：start() 会真的建起会话（running），随后被 stop() 置为
+# stopped —— 同样属于"如实记录"，不判失败。非提权环境才是 denied / failed。
+check("状态被如实记录（非提权 denied/failed；提权 running/stopped，不是异常）",
+      stats["state"] in ("denied", "failed", "running", "stopped"), True)
 check("无论哪种状态，stats 都可读", isinstance(stats["layout"], dict), True)
 
 print(f"\n{'全部通过' if not FAILURES else '失败项: ' + ', '.join(FAILURES)}")

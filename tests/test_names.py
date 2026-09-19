@@ -106,7 +106,10 @@ check("SNI 优先于 DNS", resolver.describe("93.184.216.34:443"), {"name": "www
 check("同 IP 其他端口退回 DNS", resolver.describe("93.184.216.34:8443"), {"name": "example.com", "source": "dns"})
 check("未知 IP → None", resolver.describe("8.8.8.8:443"), None)
 
-expiring = names.NameResolver(dns_ttl=0.0, sni_ttl=0.0)
+# 用负 TTL 表达"一律视为已过期"。别用 ttl=0：判断是 `now - stamp <= ttl`，
+# 而 Windows 上 time.monotonic() 的分辨率（py3.11 约 15.6ms）会让同一 tick 内 now == stamp
+# → 0 <= 0 判成"未过期"，测试在 CI 上翻车（实测 py3.11 挂、py3.13 过）。
+expiring = names.NameResolver(dns_ttl=-1.0, sni_ttl=-1.0)
 expiring.note_dns("a.com", "1.1.1.1")
 check("TTL 到期后不再返回", expiring.describe("1.1.1.1:80"), None)
 

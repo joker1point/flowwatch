@@ -6,6 +6,9 @@ history.db
 history.db-journal
 history.db-wal
 history.db-shm
+
+# 流量助手的记忆库：运行期产物，且含对话内容 —— 绝不入库
+assistant_memory.db
 *.db-journal
 *.db-wal
 *.db-shm

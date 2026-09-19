@@ -1,0 +1,94 @@
+name: ci
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+permissions:
+  contents: read
+
+jobs:
+  # Windows 全量：抓包（Npcap 的 wpcap.dll）、ETW（advapi32）、IP Helper（iphlpapi）
+  # 都是 Windows 专属接口 —— 这些脚本在本平台上跑才算"真环境"。
+  tests-windows:
+    name: 测试 · windows · py${{ matrix.python-version }}
+    runs-on: windows-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        python-version: ["3.11", "3.13"]
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: ${{ matrix.python-version }}
+
+      - name: 安装依赖
+        run: pip install -r requirements.txt
+
+      - name: 解析层 · test_names
+        run: python tests/test_names.py
+
+      - name: 历史层 · test_domain_history
+        run: python tests/test_domain_history.py
+
+      - name: ETW 解析层 · test_etw
+        run: python tests/test_etw.py
+
+      - name: ETW 批量解析层 · test_etw_batch
+        run: python tests/test_etw_batch.py
+
+  # Linux 只跑与平台无关的两个（ETW / 抓包层在 Linux 上本来就跑不了，不假装能跑）
+  tests-linux:
+    name: 跨平台测试 · ubuntu · py3.13
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.13"
+
+      - name: 解析层（纯标准库：socket / struct）
+        run: python tests/test_names.py
+
+      - name: 历史层（纯标准库：sqlite3 + threading + queue）
+        run: python tests/test_domain_history.py
+
+  # 前端构建 = tsc --noEmit（类型检查）+ vite build。
+  # VITE_API_BASE=/ 与演示包同口径：产物以相对路径请求 API，可直接交给单端口包装层。
+  web-build:
+    name: 前端构建 · node${{ matrix.node-version }}
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        node-version: ["20", "22"]
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: ${{ matrix.node-version }}
+          cache: npm
+          cache-dependency-path: web/package-lock.json
+
+      - name: 安装依赖
+        run: npm ci
+        working-directory: web
+
+      - name: 构建（tsc 类型检查 + vite）
+        run: npm run build
+        working-directory: web
+        env:
+          VITE_API_BASE: "/"
+
+      - name: 上传构建产物
+        if: matrix.node-version == '20'
+        uses: actions/upload-artifact@v4
+        with:
+          name: web-dist
+          path: web/dist
+          retention-days: 7

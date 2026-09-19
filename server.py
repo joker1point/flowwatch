@@ -48,6 +48,9 @@ HISTORY_DB = Path(__file__).with_name("history.db")   # 与项目同目录，便
 FLUSH_INTERVAL = 1.0        # 速率窗口：每秒出一次速率
 TOP_N = 50                  # 单帧最多带多少个进程（前端只渲染可见范围）
 SSE_IDLE = 15.0             # 传输层心跳
+# 历史保留/查询上限（天）：--retention-days 的默认值 + 四个 history 接口的 minutes 上限共用这一个数。
+# 改动提醒：history.HistoryStore 的 retention_days 默认值也表达同一语义，两处要一起改。
+HISTORY_MAX_DAYS = 30
 
 
 class NameCache:
@@ -321,7 +324,7 @@ async def rates(limit: int = Query(TOP_N, ge=1, le=500)) -> dict[str, Any]:
 @app.get("/api/history/process")
 def history_process(
     pid: int = Query(..., description="进程 PID"),
-    minutes: int = Query(60, ge=1, le=60 * 24 * 7),
+    minutes: int = Query(60, ge=1, le=60 * 24 * HISTORY_MAX_DAYS),
     bucket: int = Query(1, ge=1, le=60, description="重采样桶宽（分钟）"),
 ) -> dict[str, Any]:
     """某进程的历史曲线。「它从什么时候开始跑的」看 first_seen。"""
@@ -330,7 +333,7 @@ def history_process(
 
 @app.get("/api/history/top")
 def history_top(
-    minutes: int = Query(60, ge=1, le=60 * 24 * 7),
+    minutes: int = Query(60, ge=1, le=60 * 24 * HISTORY_MAX_DAYS),
     limit: int = Query(10, ge=1, le=100),
 ) -> dict[str, Any]:
     """区间内的进程排行（按累计字节），带每个进程的首末观测时刻。"""
@@ -339,7 +342,7 @@ def history_top(
 
 @app.get("/api/history/timeline")
 def history_timeline(
-    minutes: int = Query(180, ge=1, le=60 * 24 * 7),
+    minutes: int = Query(180, ge=1, le=60 * 24 * HISTORY_MAX_DAYS),
     bucket: int = Query(5, ge=1, le=60),
 ) -> dict[str, Any]:
     """整机时间序列：已归因 / 属主受限 / 未归因 / 别人的流量 分开给。"""
@@ -357,7 +360,7 @@ def events(
 
 @app.get("/api/history/domains")
 def history_domains(
-    minutes: int = Query(60, ge=1, le=60 * 24 * 7),
+    minutes: int = Query(60, ge=1, le=60 * 24 * HISTORY_MAX_DAYS),
     limit: int = Query(20, ge=1, le=200),
     named_only: bool = Query(False, description="只看有域名的（排除按 IP 归的）"),
 ) -> dict[str, Any]:
@@ -403,7 +406,8 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("--port", type=int, default=PORT)
     parser.add_argument("--interval", type=float, default=FLUSH_INTERVAL, help="速率窗口（秒）")
     parser.add_argument("--db", default=str(HISTORY_DB), help="历史库路径（SQLite）")
-    parser.add_argument("--retention-days", type=float, default=7.0, help="时间桶保留天数")
+    parser.add_argument("--retention-days", type=float, default=float(HISTORY_MAX_DAYS),
+                        help="时间桶保留天数（默认 30）")
     parser.add_argument("--no-history", action="store_true", help="不落历史（纯实时模式）")
     parser.add_argument("--etw", action="store_true",
                         help="实时消费 ETW 补全归因（需管理员；非提权时如实降级为 denied，不影响实时链路）")

@@ -63,7 +63,7 @@ class HistoryStore:
         path: str | Path = "history.db",
         bucket_seconds: int = 60,
         flush_interval: float = 10.0,
-        retention_days: float = 7.0,
+        retention_days: float = 30.0,      # 与 server.HISTORY_MAX_DAYS 同义，改一处要改另一处
         event_retention_days: float = 30.0,
         spike_factor: float = 3.0,
         spike_min_bytes: int = 1 << 20,

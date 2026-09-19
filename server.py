@@ -36,8 +36,10 @@ import psutil
 from fastapi import FastAPI, Query, Request
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import StreamingResponse
+from pydantic import BaseModel
 
 import assistant
+import autostart
 import collector
 import history
 import localconn
@@ -331,6 +333,22 @@ async def meta() -> dict[str, Any]:
         "snaplen": collector.SNAPLEN,
         "privacy": "只统计元数据（IP/端口/字节数），不保存包体",
     }
+
+
+class AutostartIn(BaseModel):
+    enabled: bool
+
+
+@app.get("/api/autostart")
+async def autostart_get() -> dict[str, Any]:
+    """开机自启现状：Windows 走 HKCU Run 键（免管理员、可逆）；其他平台如实说不支持。"""
+    return autostart.status()
+
+
+@app.post("/api/autostart")
+async def autostart_set(payload: AutostartIn) -> dict[str, Any]:
+    """开/关开机自启。写入的命令 = 当前解释器 + server.py + 当前启动参数。"""
+    return await asyncio.to_thread(autostart.set_enabled, payload.enabled)
 
 
 @app.get("/api/rates")

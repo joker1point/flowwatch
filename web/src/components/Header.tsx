@@ -1,5 +1,6 @@
 import { clock, rate } from '../format'
 import type { Health, RateFrame } from '../types'
+import { AutostartToggle } from './AutostartToggle'
 
 interface Props {
   frame: RateFrame | null
@@ -25,11 +26,14 @@ export function Header({ frame, health, connected, beats }: Props) {
           <span className="head__sub">本机流量实时监控 · 按进程归因（只统计元数据）</span>
         </div>
 
-        <div className={`pulse ${connected ? 'is-on' : 'is-off'}`} key={beats} title="每秒一帧速率窗口">
-          <span className="pulse__dot" />
-          <span className="pulse__text">
-            {connected ? `实时 · ${frame ? clock(frame.ts) : ''}` : '连接中断'}
-          </span>
+        <div className="head__actions">
+          <AutostartToggle />
+          <div className={`pulse ${connected ? 'is-on' : 'is-off'}`} key={beats} title="每秒一帧速率窗口">
+            <span className="pulse__dot" />
+            <span className="pulse__text">
+              {connected ? `实时 · ${frame ? clock(frame.ts) : ''}` : '连接中断'}
+            </span>
+          </div>
         </div>
       </div>
 

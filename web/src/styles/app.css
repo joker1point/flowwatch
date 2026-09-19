@@ -265,6 +265,51 @@ body {
 .list--local .list__head,
 .list--local .row { grid-template-columns: minmax(0, 1.5fr) 74px minmax(0, 1.1fr) 72px; }
 
+/* ── 开机自启开关 ───────────────────────────────────────────────────── */
+.head__actions { display: flex; align-items: center; gap: var(--s-3); }
+
+.autostart {
+  display: inline-flex;
+  align-items: center;
+  gap: var(--s-2);
+  padding: 4px 10px;
+  border: 1px solid var(--hairline);
+  border-radius: 999px;
+  background: none;
+  color: var(--text-secondary);
+  font-size: 11px;
+  font-family: inherit;
+  cursor: pointer;
+  white-space: nowrap;
+}
+
+.autostart:hover { background: var(--bg-hover); }
+.autostart:disabled { opacity: 0.6; cursor: progress; }
+
+.autostart__track {
+  position: relative;
+  width: 28px;
+  height: 15px;
+  border-radius: 999px;
+  background: var(--hairline);
+  transition: background 0.15s ease;
+}
+
+.autostart__knob {
+  position: absolute;
+  top: 1.5px;
+  left: 1.5px;
+  width: 12px;
+  height: 12px;
+  border-radius: 50%;
+  background: var(--text-muted);
+  transition: transform 0.15s ease, background 0.15s ease;
+}
+
+.autostart.is-on { color: var(--ok); border-color: var(--ok); }
+.autostart.is-on .autostart__track { background: var(--ok); }
+.autostart.is-on .autostart__knob { transform: translateX(13px); background: var(--bg-panel); }
+
 .row--static { cursor: default; }
 
 .bar--inline {

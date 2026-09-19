@@ -238,3 +238,25 @@ export async function testAssistantConfig(
   if (!response.ok) throw new Error(`测试失败 HTTP ${response.status}`)
   return (await response.json()) as { ok: boolean; detail: string }
 }
+
+/* 开机自启：Windows 走 HKCU Run 键（免管理员、可逆）；不支持时前端整个开关不渲染 */
+
+export interface Autostart {
+  supported: boolean
+  enabled: boolean
+  /** 启用后会写入注册表的命令（= 当前这条启动命令原样记下） */
+  command: string
+  detail: string
+}
+
+export const fetchAutostart = () => getJson<Autostart>('/api/autostart')
+
+export async function setAutostart(enabled: boolean): Promise<Autostart> {
+  const response = await fetch(`${API_BASE}/api/autostart`, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ enabled }),
+  })
+  if (!response.ok) throw new Error(`设置失败 HTTP ${response.status}`)
+  return (await response.json()) as Autostart
+}

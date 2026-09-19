@@ -1,0 +1,20 @@
+{
+  "id": "flowwatch-alert",
+  "name": "flowwatch 流量告警",
+  "version": "0.1.0",
+  "description": "接收 flowwatch 代理哨兵的本地告警（POST /alert），弹桌面小窗卡片",
+  "icon": "icon.svg",
+  "main": "ui.mjs",
+  "settings": "settings.mjs",
+  "events": [
+    "flowwatch-alert",
+    "kind:flowwatch-alert",
+    "flowwatch-alert.alert"
+  ],
+  "enabledByDefault": false,
+  "sidecar": {
+    "command": "node",
+    "args": ["runtime/main.mjs"],
+    "cwd": "."
+  }
+}

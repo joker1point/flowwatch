@@ -27,6 +27,7 @@ import sqlite3
 import sys
 import threading
 import time
+import urllib.request
 from pathlib import Path
 
 ROOT = Path(__file__).resolve().parent.parent          # flowwatch/
@@ -41,6 +42,10 @@ LIMIT_ALERT_GB = 10.0                                  # 60 分钟上行阈值
 LIMIT_WARN_GB = 5.0                                    # 30 分钟上行阈值
 COOLDOWN = 1800                                        # 同类告警冷却（秒）
 CHECK_INTERVAL = 300                                   # 常驻模式周期（秒）
+
+# Catrace「flowwatch-alert」插件（桌面小窗告警）：sidecar 监听的回环端口，按序探测
+CATRACE_PORTS = (23457, 23458, 23459)
+CATRACE_TIMEOUT = 2.0
 
 
 def usage(now: float | None = None) -> dict:
@@ -106,14 +111,44 @@ def _show_popup(title: str, body: str) -> None:
         pass
 
 
+def _catrace_notify(title: str, body: str, level: str = "warning") -> bool:
+    """把告警推给 Catrace 小窗（本机回环 HTTP）。成功返回 True。"""
+    payload = json.dumps({"title": title, "body": body, "level": level},
+                         ensure_ascii=False).encode("utf-8")
+    for port in CATRACE_PORTS:
+        try:
+            req = urllib.request.Request(
+                f"http://127.0.0.1:{port}/alert",
+                data=payload,
+                headers={"Content-Type": "application/json; charset=utf-8"},
+                method="POST",
+            )
+            with urllib.request.urlopen(req, timeout=CATRACE_TIMEOUT) as resp:
+                # 严格校验响应体：同端口若是别的程序（例如 Catrace 本体占着 23457），
+                # 也可能回 200；只看状态码会误判成功、静默丢告警。
+                if resp.status == 200:
+                    try:
+                        body = json.loads(resp.read(4096).decode("utf-8", "replace"))
+                        if isinstance(body, dict) and body.get("ok") is True:
+                            return True
+                    except Exception:
+                        pass
+        except Exception:
+            continue
+    return False
+
+
 def alert(title: str, body: str) -> None:
-    """桌面告警文件（持久留档）+ 置顶弹窗（独立线程，不阻塞检查流程）。"""
+    """告警出口：Catrace 小窗优先，置顶弹窗兜底；桌面文件始终留档。"""
     try:
         path = desktop_dir() / "⚠️代理流量告警.txt"
         path.write_text(f"{dt.datetime.now():%Y-%m-%d %H:%M:%S}\n{title}\n\n{body}\n",
                         encoding="utf-8")
     except Exception:
         pass
+    if _catrace_notify(title, body, level="warning"):
+        print("（已推送 Catrace 小窗）")
+        return
     threading.Thread(target=_show_popup, args=(title, body), name="sentinel-popup").start()
 
 
@@ -180,7 +215,7 @@ def main() -> int:
 
     if args.test:
         alert("流量哨兵测试",
-              "这是一条测试告警：桌面文件 + 置顶弹窗通道正常。\n\n"
+              "这是一条测试告警：桌面文件 + Catrace 小窗（未装/未启用则退回置顶弹窗）通道正常。\n\n"
               "实际告警会在代理上行异常时自动弹出（阈值：30 分钟 5 GB / 60 分钟 10 GB）。")
         print("测试告警已触发。")
         return 0

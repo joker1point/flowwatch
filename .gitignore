@@ -17,6 +17,9 @@ assistant_memory.db
 _run/
 *.log
 
+# Catrace「flowwatch-alert」插件 sidecar 运行时状态（不入库）
+integrations/flowwatch-alert/runtime/state.json
+
 # ETW 采集产物（logman/tracerpt 会生成几 MB 的二进制，绝不入库）
 *.etl
 *.etl.csv

@@ -40,6 +40,7 @@ from fastapi.responses import StreamingResponse
 import assistant
 import collector
 import history
+import localconn
 import notes
 
 logger = logging.getLogger("flowwatch.server")
@@ -105,6 +106,8 @@ class RateHub:
         self.subscribers: set[asyncio.Queue] = set()
         self.latest: dict[str, Any] = {}
         self.frames = 0
+        # 本机连接归属：抓包看不到环回与代理那一层，按系统连接表补上（见 localconn.py）
+        self.localconn = localconn.LocalConnTable()
 
     def describe(self, remote: str) -> dict[str, Any]:
         """给一条连接附上域名（拿不到就是 None，不猜）。"""
@@ -176,6 +179,9 @@ class RateHub:
             "unknown_flows": window.get("unknown_flows", []),   # 未归因明细（前 8 条，诊断用）
             "domains": window.get("domains", [])[:24],          # 本窗口域名排行（全量连接汇总）
             "by_pid": by_pid[:TOP_N],
+            # 本机连接归属（系统连接表快照）：抓包只看得见代理进程，
+            # 这里回答"谁在连代理 / 本地服务"—— 重试风暴时按连接数一眼定位（见 localconn.py）
+            "local_conns": self.localconn.snapshot(),
         }
         self.latest = frame
         self.frames += 1
@@ -242,11 +248,13 @@ async def lifespan(app: FastAPI):
         store.start_writer()                         # 写库搬到独立线程：实时链路零等待
         logger.info("历史层已开启: %s（桶 %ds，保留 %g 天）",
                     store.path, store.bucket_seconds, store.retention_days)
+    hub.localconn.start()                            # 独立线程：不依赖抓包，随时可用
     starter = asyncio.create_task(_start_capturer(), name="flowwatch-start")
     ticker = asyncio.create_task(hub.run(), name="flowwatch-ticker")
     try:
         yield
     finally:
+        hub.localconn.stop()
         for task in (ticker, starter):
             task.cancel()
             try:

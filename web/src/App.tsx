@@ -7,6 +7,7 @@ import { EventFeed } from './components/EventFeed'
 import { Header } from './components/Header'
 import { HistoryPanel } from './components/HistoryPanel'
 import { HistoryView } from './components/HistoryView'
+import { LocalConnPanel } from './components/LocalConnPanel'
 import { NotesPanel } from './components/NotesPanel'
 import { ProcessList } from './components/ProcessList'
 import type { SortKey } from './components/ProcessList'
@@ -125,6 +126,13 @@ export default function App() {
     )
   }, [frame, query])
 
+  // pid → 指向本机的连接数（连接表快照）：进程行标"本机 N 连"，一眼看出谁在用代理/本地服务
+  const localConns = useMemo(() => {
+    const map: Record<number, number> = {}
+    for (const row of frame?.local_conns?.by_pid ?? []) map[row.pid] = row.local_conns
+    return map
+  }, [frame])
+
   const selected = useMemo(
     () => rows.find((row) => row.pid === selectedPid) ?? null,
     [rows, selectedPid],
@@ -226,6 +234,7 @@ export default function App() {
                 sortKey={sortKey}
                 onSort={setSortKey}
                 hasFilter={query.trim().length > 0}
+                localConns={localConns}
               />
             ) : (
               <DomainList entries={frame?.domains ?? []} hourTop={hourTopDomains} />
@@ -237,6 +246,11 @@ export default function App() {
         <div className="column">
           <AssistantPanel />
           <ThroughputChart history={throughput} />
+          <LocalConnPanel
+            data={frame?.local_conns}
+            selectedPid={selectedPid}
+            onSelect={setSelectedPid}
+          />
           <ConnDetail row={selected} />
           <HistoryPanel
             history={processHistory}

@@ -59,6 +59,41 @@ export interface DomainTop extends DomainEntry {
   total_bytes: number
 }
 
+/** 本机连接归属：系统连接表快照 —— 抓包看不到环回与代理那一层，这里补上。 */
+export interface LocalConnRow {
+  pid: number
+  process: string
+  /** 活动连接总数（ESTABLISHED） */
+  conns: number
+  /** 其中指向「本机地址」的条数：= 在用本机的代理/本地服务 */
+  local_conns: number
+  /** 新出现的本机侧端点速率：短连接风暴（重试循环）会在这里爆表 */
+  new_per_sec: number
+  /** 在连哪些本机端口（Top N） */
+  top_peers: { port: number; conns: number }[]
+}
+
+/** 本机监听端口 ← 有哪些进程在连它。 */
+export interface LocalService {
+  port: number
+  pid: number | null
+  process: string | null
+  /** 不同客户端进程数 */
+  clients: number
+  conns: number
+}
+
+export interface LocalConns {
+  source: string
+  error: string
+  refresh_ms: number
+  refresh_interval: number
+  total_conns: number
+  local_conns: number
+  by_pid: LocalConnRow[]
+  services: LocalService[]
+}
+
 export interface RateFrame {
   schema: string
   ts: string
@@ -68,6 +103,8 @@ export interface RateFrame {
   /** 本窗口域名排行（采集层按全部连接汇总，超出上限的并入 "(其他域名)"） */
   domains?: DomainEntry[]
   by_pid: PidRate[]
+  /** 本机连接归属（连接表快照）：回答"谁在连代理/本地服务"，抓包视角看不见 */
+  local_conns?: LocalConns
 }
 
 export interface Meta {

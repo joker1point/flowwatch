@@ -261,6 +261,10 @@ body {
 .list--domains .list__head,
 .list--domains .row { grid-template-columns: minmax(0, 1.7fr) 62px 84px 84px minmax(0, 1.4fr); }
 
+/* 本机连接面板：4 列（发起方 / 连本机 / 目标端口 / 新建速率） */
+.list--local .list__head,
+.list--local .row { grid-template-columns: minmax(0, 1.5fr) 74px minmax(0, 1.1fr) 72px; }
+
 .row--static { cursor: default; }
 
 .bar--inline {

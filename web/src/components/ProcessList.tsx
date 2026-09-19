@@ -10,6 +10,9 @@ interface Props {
   sortKey: SortKey
   onSort: (key: SortKey) => void
   hasFilter: boolean
+  /** pid → 指向本机的连接数（连接表快照）。有值时行内标出"本机 N 连"——
+   *  用来一眼看出"谁在用代理 / 本地服务"，这是抓包视角看不到的那一层。 */
+  localConns?: Record<number, number>
 }
 
 function sortValue(row: PidRate, key: SortKey): number {
@@ -18,7 +21,15 @@ function sortValue(row: PidRate, key: SortKey): number {
   return row.out_bps + row.in_bps
 }
 
-export function ProcessList({ rows, selectedPid, onSelect, sortKey, onSort, hasFilter }: Props) {
+export function ProcessList({
+  rows,
+  selectedPid,
+  onSelect,
+  sortKey,
+  onSort,
+  hasFilter,
+  localConns,
+}: Props) {
   if (rows.length === 0) {
     return (
       <div className="empty">
@@ -108,6 +119,11 @@ export function ProcessList({ rows, selectedPid, onSelect, sortKey, onSort, hasF
                     </>
                   )}
                   {row.conns.length > 1 ? <span className="more">+{row.conns.length - 1}</span> : null}
+                  {localConns?.[row.pid] ? (
+                    <span className="more" title="指向本机服务 / 代理的连接数（抓包看不到这一层）">
+                      本机 {localConns[row.pid]} 连
+                    </span>
+                  ) : null}
                 </>
               ) : (
                 <span className="dim">—</span>

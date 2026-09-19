@@ -5,6 +5,7 @@ import { DomainList } from './components/DomainList'
 import { EventFeed } from './components/EventFeed'
 import { Header } from './components/Header'
 import { HistoryPanel } from './components/HistoryPanel'
+import { HistoryView } from './components/HistoryView'
 import { ProcessList } from './components/ProcessList'
 import type { SortKey } from './components/ProcessList'
 import { ThroughputChart } from './components/ThroughputChart'
@@ -24,6 +25,7 @@ export default function App() {
   const [processHistory, setProcessHistory] = useState<ProcessHistory | null>(null)
   const [historyLoading, setHistoryLoading] = useState(false)
   const [view, setView] = useState<'process' | 'domain'>('process')
+  const [page, setPage] = useState<'live' | 'history'>('live')
   const [hourTopDomains, setHourTopDomains] = useState<DomainTop[]>([])
 
   // 近 1 小时的域名排行（历史库）：与实时域名列表互补 —— 一个看"此刻"，一个看"这一小时"
@@ -134,6 +136,31 @@ export default function App() {
 
       {!connected && error ? <div className="banner">连接中断：{error} —— 正在自动重连…</div> : null}
 
+      <nav className="viewSwitch" role="tablist" aria-label="视图">
+        <button
+          type="button"
+          role="tab"
+          aria-selected={page === 'live'}
+          className={page === 'live' ? 'is-active' : ''}
+          onClick={() => setPage('live')}
+        >
+          实时
+        </button>
+        <button
+          type="button"
+          role="tab"
+          aria-selected={page === 'history'}
+          className={page === 'history' ? 'is-active' : ''}
+          onClick={() => setPage('history')}
+        >
+          历史与分析
+        </button>
+      </nav>
+
+      {page === 'history' ? (
+        <HistoryView health={health} />
+      ) : (
+        <>
       <div className="toolbar">
         <input
           className="search"
@@ -204,6 +231,8 @@ export default function App() {
           />
         </div>
       </main>
+        </>
+      )}
 
       <footer className="footer">
         <span>flowwatch · 只统计元数据（IP / 端口 / 字节数），不保存包体 · 只统计本机流量</span>

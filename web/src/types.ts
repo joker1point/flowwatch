@@ -115,6 +115,27 @@ export interface Health {
     parse_errors: number
     coverage_note: string
   }
+  /** 历史层自述：库多大、攒了多久、有没有丢样本 —— 历史分析视图用它交代数据覆盖面 */
+  history: {
+    enabled: boolean
+    path: string
+    bucket_seconds: number
+    retention_days: number
+    buckets: number
+    events: number
+    domain_rows: number
+    /** 库里最早的一桶（数据覆盖从这里开始） */
+    oldest: string | null
+    writes: number
+    events_written: number
+    cold_start_skipped: number
+    queued: number
+    dropped: number
+    errors: number
+    last_error: string
+    last_write_ms: number
+    size_kb: number
+  }
   ts: string
 }
 
@@ -143,6 +164,36 @@ export interface ProcessHistory {
   total_bytes: number
   peak_bps: number
   series: HistorySample[]
+}
+
+/** 整机分层时间序列（`/api/history/timeline`）：本机流量按归属拆三层，别人的流量单独给。 */
+export interface TimelinePoint {
+  ts: string
+  own_out_bps: number
+  own_in_bps: number
+  /** 端点已知、但属主受权限限制（非提权运行） */
+  masked_bps: number
+  /** 说不清是谁的 */
+  unattributed_bps: number
+  /** 广播域里别人的帧：物理上不属于本机，单独看 */
+  foreign_bps: number
+}
+
+export interface TimelineResponse {
+  bucket_seconds: number
+  since: string
+  series: TimelinePoint[]
+}
+
+/** 区间内按累计字节排行的进程（`/api/history/top`）。 */
+export interface ProcessTop {
+  pid: number
+  process: string
+  total_bytes: number
+  out_bytes: number
+  in_bytes: number
+  first_seen: string
+  last_seen: string
 }
 
 export type EventKind = 'appear' | 'vanish' | 'spike'

@@ -490,6 +490,123 @@ body {
 
 .panel__hint--pad { margin: 0; padding: var(--s-4); }
 
+/* ── 视图切换（实时 / 历史与分析）───────────────────────────────────── */
+.viewSwitch {
+  display: flex;
+  gap: var(--s-1);
+  width: fit-content;
+  margin-bottom: var(--s-3);
+  padding: 3px;
+  border: 1px solid var(--hairline);
+  border-radius: var(--radius-md);
+  background: var(--bg-panel);
+}
+
+.viewSwitch button {
+  padding: 5px var(--s-4);
+  border: 0;
+  border-radius: var(--radius-sm);
+  background: none;
+  color: var(--text-secondary);
+  font: inherit;
+  font-size: 12px;
+  cursor: pointer;
+  transition: background var(--dur-fast) var(--ease-out-quart), color var(--dur-fast) var(--ease-out-quart);
+}
+
+.viewSwitch button.is-active { background: var(--accent-soft); color: var(--accent); }
+
+/* ── 历史分析视图 ───────────────────────────────────────────────────── */
+.hist { display: flex; flex-direction: column; gap: var(--s-4); }
+
+.hist__bar { display: flex; flex-wrap: wrap; align-items: center; gap: var(--s-3); }
+.hist__meta { color: var(--text-muted); font-size: 11px; }
+.hist__state { margin-left: auto; color: var(--warn); font-size: 11px; }
+
+.hist__summary {
+  display: grid;
+  grid-template-columns: repeat(5, minmax(0, 1fr));
+  gap: var(--s-3);
+  padding: var(--s-3) var(--s-4);
+  border: 1px solid var(--hairline);
+  border-radius: var(--radius-md);
+  background: var(--bg-panel);
+}
+
+.hist__columns {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: var(--s-4);
+}
+
+@media (max-width: 900px) {
+  .hist__summary { grid-template-columns: repeat(2, minmax(0, 1fr)); }
+  .hist__columns { grid-template-columns: minmax(0, 1fr); }
+}
+
+/* 分层曲线：本机三层堆叠 + 别人的流量单独虚线；比实时曲线高一些，看清长期形状 */
+.hist .chart svg { height: 180px; }
+.chart__band { stroke: none; }
+.chart__band--own { fill: var(--accent); }
+.chart__band--masked { fill: var(--warn); }
+.chart__band--unattributed { fill: var(--info); }
+
+/* 别人的流量：单独一条细柱压在堆叠柱之上，不参与堆叠 */
+.chart__foreign { fill: var(--text-muted); opacity: 0.6; }
+
+.chart__cursor { stroke: var(--accent-line); stroke-width: 1; vector-effect: non-scaling-stroke; }
+
+.panel > .chart__legend { padding: 0 var(--s-4); }
+.legend--own { color: var(--accent); }
+.legend--masked { color: var(--warn); }
+.legend--unattr { color: var(--info); }
+.legend--foreign { color: var(--text-muted); }
+
+/* 归属构成条：本机流量三层各占多少 */
+.mix { padding: var(--s-3) var(--s-4) 0; border-top: 1px solid var(--hairline); }
+
+.mix__bar {
+  display: flex;
+  height: 8px;
+  overflow: hidden;
+  border-radius: 999px;
+  background: var(--bg-raised);
+}
+
+.mix__seg { height: 100%; }
+.mix__seg--own { background: var(--accent); }
+.mix__seg--masked { background: var(--warn); }
+.mix__seg--unattr { background: var(--info); }
+.mix .panel__note { margin-top: var(--s-3); }
+
+/* 排行（进程 / 域名）：名次 · 名称 · 占比条 · 累计 · 明细 */
+.rank { list-style: none; margin: 0; padding: var(--s-2) 0; }
+
+.rank__row {
+  display: grid;
+  grid-template-columns: 20px minmax(0, 1.6fr) minmax(48px, 0.9fr) 76px 84px;
+  align-items: center;
+  gap: var(--s-2);
+  padding: 5px var(--s-4);
+}
+
+.rank__row:hover { background: var(--bg-hover); }
+.rank__no { font-size: 11px; text-align: right; }
+.rank__name { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; font-size: 12px; }
+
+.rank__bar { height: 5px; overflow: hidden; border-radius: 999px; background: var(--bg-raised); }
+
+.rank__fill {
+  display: block;
+  height: 100%;
+  border-radius: 999px;
+  background: var(--accent);
+  opacity: 0.75;
+}
+
+.rank__val { font-size: 12px; text-align: right; }
+.rank__sub { font-size: 10px; text-align: right; }
+
 ::-webkit-scrollbar { width: 10px; height: 10px; }
 ::-webkit-scrollbar-track { background: transparent; }
 ::-webkit-scrollbar-thumb {

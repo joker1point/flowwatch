@@ -37,6 +37,16 @@ export function minuteLabel(iso: string): string {
   return `${String(date.getHours()).padStart(2, '0')}:${String(date.getMinutes()).padStart(2, '0')}`
 }
 
+/** 跨天的区间只给 HH:MM 会分不清是哪天：宽区间带上 MM-DD。 */
+export function stampLabel(iso: string | null | undefined, withDate: boolean): string {
+  if (!iso) return '—'
+  const date = new Date(iso)
+  if (Number.isNaN(date.getTime())) return '—'
+  const hhmm = `${String(date.getHours()).padStart(2, '0')}:${String(date.getMinutes()).padStart(2, '0')}`
+  if (!withDate) return hhmm
+  return `${String(date.getMonth() + 1).padStart(2, '0')}-${String(date.getDate()).padStart(2, '0')} ${hhmm}`
+}
+
 /** "12 分钟前" —— 回答"从什么时候开始的"时，相对时间比时间戳好读。 */
 export function ago(iso: string | null): string {
   if (!iso) return '未知'

@@ -1,4 +1,13 @@
-import type { ChangeEvent, DomainTop, Health, Meta, ProcessHistory, RateFrame } from './types'
+import type {
+  ChangeEvent,
+  DomainTop,
+  Health,
+  Meta,
+  ProcessHistory,
+  ProcessTop,
+  RateFrame,
+  TimelineResponse,
+} from './types'
 
 /** 默认直连本机 API；构建时可用 VITE_API_BASE=/ 改成同源（单端口部署）。 */
 const RAW_BASE = (import.meta.env.VITE_API_BASE as string | undefined) ?? 'http://127.0.0.1:8788'
@@ -32,4 +41,14 @@ export const fetchEvents = (limit = 30, pid?: number) =>
 export const fetchTopDomains = (minutes = 60, limit = 5) =>
   getJson<{ minutes: number; items: DomainTop[] }>(
     `/api/history/domains?minutes=${minutes}&limit=${limit}`,
+  )
+
+/* 历史分析视图用的三个查询：整机分层曲线、进程排行、区间内事件（前端按时间过滤） */
+
+export const fetchTimeline = (minutes: number, bucket: number) =>
+  getJson<TimelineResponse>(`/api/history/timeline?minutes=${minutes}&bucket=${bucket}`)
+
+export const fetchTopProcesses = (minutes: number, limit = 10) =>
+  getJson<{ minutes: number; items: ProcessTop[] }>(
+    `/api/history/top?minutes=${minutes}&limit=${limit}`,
   )

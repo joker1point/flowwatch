@@ -210,8 +210,11 @@ export function HistoryView({ health }: Props) {
   const sinceTs = timeline
     ? new Date(timeline.since).getTime()
     : Date.now() - config.minutes * 60_000
-  /** 区间内的桶位总数：有数据的桶比它少，就说明中间有空档（服务没跑或超出保留期） */
-  const slots = Math.max(1, Math.round((config.minutes * 60) / bucketSeconds))
+  /**
+   * 区间内的桶位总数：有数据的桶比它少，就说明中间有空档（服务没跑或超出保留期）。
+   * 后端的 since 是 `当前桶 - minutes*60`，**含当前桶**，所以是 +1 个桶位（实测 1 小时视图返回 61 桶）。
+   */
+  const slots = Math.max(1, Math.round((config.minutes * 60) / bucketSeconds) + 1)
   const firstPoint = series.at(0)
   const lastPoint = series.at(-1)
 

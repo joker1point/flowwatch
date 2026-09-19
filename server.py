@@ -40,6 +40,7 @@ from fastapi.responses import StreamingResponse
 import assistant
 import collector
 import history
+import notes
 
 logger = logging.getLogger("flowwatch.server")
 
@@ -265,6 +266,10 @@ app.add_middleware(
     allow_headers=["*"],
 )
 app.include_router(assistant.router)
+
+# 笔记区（用户笔记 + AI 每日流量笔记）：注入只读历史库
+notes.configure(store=store)
+app.include_router(notes.router)
 
 
 def sse(event: str, payload: Any) -> str:

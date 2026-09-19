@@ -7,6 +7,7 @@ import { EventFeed } from './components/EventFeed'
 import { Header } from './components/Header'
 import { HistoryPanel } from './components/HistoryPanel'
 import { HistoryView } from './components/HistoryView'
+import { NotesPanel } from './components/NotesPanel'
 import { ProcessList } from './components/ProcessList'
 import type { SortKey } from './components/ProcessList'
 import { ThroughputChart } from './components/ThroughputChart'
@@ -26,7 +27,7 @@ export default function App() {
   const [processHistory, setProcessHistory] = useState<ProcessHistory | null>(null)
   const [historyLoading, setHistoryLoading] = useState(false)
   const [view, setView] = useState<'process' | 'domain'>('process')
-  const [page, setPage] = useState<'live' | 'history'>('live')
+  const [page, setPage] = useState<'live' | 'history' | 'notes'>('live')
   const [hourTopDomains, setHourTopDomains] = useState<DomainTop[]>([])
 
   // 近 1 小时的域名排行（历史库）：与实时域名列表互补 —— 一个看"此刻"，一个看"这一小时"
@@ -156,10 +157,21 @@ export default function App() {
         >
           历史与分析
         </button>
+        <button
+          type="button"
+          role="tab"
+          aria-selected={page === 'notes'}
+          className={page === 'notes' ? 'is-active' : ''}
+          onClick={() => setPage('notes')}
+        >
+          笔记
+        </button>
       </nav>
 
       {page === 'history' ? (
         <HistoryView health={health} />
+      ) : page === 'notes' ? (
+        <NotesPanel />
       ) : (
         <>
       <div className="toolbar">

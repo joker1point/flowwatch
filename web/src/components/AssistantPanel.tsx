@@ -1,5 +1,13 @@
 import { useEffect, useMemo, useRef, useState } from 'react'
-import { askAssistant, assistantReset, fetchAssistantStatus } from '../api'
+import {
+  askAssistant,
+  assistantReset,
+  fetchAssistantConfig,
+  fetchAssistantStatus,
+  saveAssistantConfig,
+  testAssistantConfig,
+} from '../api'
+import type { AssistantConfig, AssistantConfigIn } from '../api'
 import type { AssistantStatus } from '../types'
 
 /** 面板里的一行：用户提问 / 助手回答 / 工具调用过程 / 系统提示。 */
@@ -61,6 +69,18 @@ export function AssistantPanel() {
   const [input, setInput] = useState('')
   const [busy, setBusy] = useState(false)
   const [error, setError] = useState<string | null>(null)
+  // ---- 模型设置（开源用户开箱可配：写 assistant_config.json，保存即生效）----
+  const [showSettings, setShowSettings] = useState(false)
+  const [config, setConfig] = useState<AssistantConfig | null>(null)
+  const [form, setForm] = useState<AssistantConfigIn>({
+    provider: 'openai',
+    base_url: '',
+    api_key: '',
+    model: '',
+  })
+  const [cfgBusy, setCfgBusy] = useState<'save' | 'test' | null>(null)
+  const [cfgNotice, setCfgNotice] = useState<string | null>(null)
+  const [cfgOk, setCfgOk] = useState<boolean | null>(null)
   const sid = useMemo(sessionId, [])
   const listRef = useRef<HTMLDivElement | null>(null)
 
@@ -144,6 +164,58 @@ export function AssistantPanel() {
       .catch((err: unknown) => setError(err instanceof Error ? err.message : String(err)))
   }
 
+  // ---- 模型设置：打开时回填 / 保存 / 试连 ----
+  const openSettings = () => {
+    void fetchAssistantConfig()
+      .then((value) => {
+        setConfig(value)
+        const known = ['openai', 'ollama', 'mock']
+        setForm({
+          provider: (
+            known.includes(value.provider) ? value.provider : 'openai'
+          ) as AssistantConfigIn['provider'],
+          base_url: value.base_url,
+          api_key: '',
+          model: value.model,
+        })
+      })
+      .catch(() => undefined)
+  }
+
+  const saveConfig = async () => {
+    setCfgBusy('save')
+    setCfgNotice(null)
+    setCfgOk(null)
+    try {
+      const res = await saveAssistantConfig(form)
+      setCfgNotice(`已保存并生效：${res.provider_label}`)
+      setCfgOk(true)
+      refresh()
+      openSettings()
+    } catch (err) {
+      setCfgNotice(err instanceof Error ? err.message : String(err))
+      setCfgOk(false)
+    } finally {
+      setCfgBusy(null)
+    }
+  }
+
+  const testConfig = async () => {
+    setCfgBusy('test')
+    setCfgNotice('正在测试连通性（真实调用一次模型）…')
+    setCfgOk(null)
+    try {
+      const res = await testAssistantConfig(form)
+      setCfgNotice(res.detail)
+      setCfgOk(res.ok)
+    } catch (err) {
+      setCfgNotice(err instanceof Error ? err.message : String(err))
+      setCfgOk(false)
+    } finally {
+      setCfgBusy(null)
+    }
+  }
+
   const blocks = status?.memory.blocks ?? []
 
   return (
@@ -151,10 +223,115 @@ export function AssistantPanel() {
       <div className="panel__head">
         <h2 className="panel__title">流量助手</h2>
         <span className="panel__hint">{status ? status.provider_label : '读取中…'}</span>
+        <button
+          type="button"
+          className="assistant__clear"
+          onClick={() => {
+            const next = !showSettings
+            setShowSettings(next)
+            setCfgNotice(null)
+            if (next) openSettings()
+          }}
+        >
+          {showSettings ? '收起设置' : '模型设置'}
+        </button>
         <button type="button" className="assistant__clear" onClick={clearSession} disabled={busy}>
           清空对话
         </button>
       </div>
+
+      {showSettings ? (
+        <div className="assistant__settings">
+          <label className="assistant__field">
+            <span className="assistant__fieldLabel">接口类型</span>
+            <select
+              className="assistant__select"
+              value={form.provider}
+              onChange={(event) =>
+                setForm((prev) => ({
+                  ...prev,
+                  provider: event.target.value as AssistantConfigIn['provider'],
+                }))
+              }
+              aria-label="接口类型"
+            >
+              <option value="openai">OpenAI 兼容（OpenAI / DashScope / DeepSeek / 各类中转）</option>
+              <option value="ollama">本地 Ollama（数据零外发）</option>
+              <option value="mock">mock（不联网，仅演示链路）</option>
+            </select>
+          </label>
+
+          {form.provider !== 'mock' ? (
+            <>
+              <label className="assistant__field">
+                <span className="assistant__fieldLabel">Base URL</span>
+                <input
+                  className="assistant__input"
+                  value={form.base_url}
+                  onChange={(event) => setForm((prev) => ({ ...prev, base_url: event.target.value }))}
+                  placeholder={
+                    form.provider === 'ollama'
+                      ? 'http://127.0.0.1:11434/v1'
+                      : 'https://dashscope.aliyuncs.com/compatible-mode/v1'
+                  }
+                />
+              </label>
+              {form.provider === 'openai' ? (
+                <label className="assistant__field">
+                  <span className="assistant__fieldLabel">API Key</span>
+                  <input
+                    className="assistant__input"
+                    type="password"
+                    value={form.api_key}
+                    onChange={(event) => setForm((prev) => ({ ...prev, api_key: event.target.value }))}
+                    placeholder={
+                      config?.api_key_masked
+                        ? `已保存 ${config.api_key_masked}（留空 = 不修改）`
+                        : 'sk-...'
+                    }
+                    autoComplete="off"
+                  />
+                </label>
+              ) : null}
+              <label className="assistant__field">
+                <span className="assistant__fieldLabel">模型</span>
+                <input
+                  className="assistant__input"
+                  value={form.model}
+                  onChange={(event) => setForm((prev) => ({ ...prev, model: event.target.value }))}
+                  placeholder={form.provider === 'ollama' ? 'qwen2.5:7b' : 'qwen-plus'}
+                />
+              </label>
+            </>
+          ) : null}
+
+          <div className="assistant__settingsActions">
+            <button
+              type="button"
+              className="assistant__send"
+              onClick={() => void saveConfig()}
+              disabled={cfgBusy !== null}
+            >
+              {cfgBusy === 'save' ? '保存中…' : '保存并生效'}
+            </button>
+            <button
+              type="button"
+              className="assistant__clear"
+              onClick={() => void testConfig()}
+              disabled={cfgBusy !== null}
+            >
+              {cfgBusy === 'test' ? '测试中…' : '测试连接'}
+            </button>
+          </div>
+          {cfgNotice ? (
+            <p className={cfgOk === false ? 'msg msg--notice' : 'panel__hint'}>{cfgNotice}</p>
+          ) : null}
+          <p className="panel__hint">
+            配置保存在本机 <code>{config?.config_path ?? 'assistant_config.json'}</code>
+            （已加入 .gitignore，不会提交）。环境变量 / .env 仍可用，页面里的设置优先。
+          </p>
+        </div>
+      ) : null}
 
       {blocks.length > 0 ? (
         <p
@@ -189,8 +366,8 @@ export function AssistantPanel() {
 
       {status && !status.configured ? (
         <p className="panel__note">
-          助手未配置模型：设置 <code>FLOWWATCH_ASSISTANT_PROVIDER</code>（openai / ollama / mock）
-          与 <code>FLOWWATCH_ASSISTANT_MODEL</code> 后重启服务即可。用 ollama 或 mock 则零外发。
+          助手还没配模型：点右上角「模型设置」，填一个 OpenAI 兼容接口或本地 Ollama 即可用 ——
+          保存后立即生效，无需重启。用 ollama 或 mock 则零外发。
         </p>
       ) : null}
 

@@ -113,3 +113,128 @@ export const fetchTopProcesses = (minutes: number, limit = 10) =>
   getJson<{ minutes: number; items: ProcessTop[] }>(
     `/api/history/top?minutes=${minutes}&limit=${limit}`,
   )
+
+/* 笔记区：用户笔记（落盘）+ AI 每日流量笔记 + 人设 */
+
+export interface UserNotes {
+  content: string
+  path: string
+}
+
+export interface Persona {
+  id: string
+  name: string
+  prompt: string
+  builtin?: boolean
+}
+
+export interface AiNote {
+  date: string
+  persona_id: string
+  persona_name: string
+  content: string
+  generated_at: number
+}
+
+export const fetchUserNotes = () => getJson<UserNotes>('/api/notes/user')
+
+export async function saveUserNotes(content: string): Promise<{ ok: boolean; bytes: number }> {
+  const response = await fetch(`${API_BASE}/api/notes/user`, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ content }),
+  })
+  if (!response.ok) throw new Error(`保存失败 HTTP ${response.status}`)
+  return (await response.json()) as { ok: boolean; bytes: number }
+}
+
+export const fetchPersonas = () => getJson<{ items: Persona[] }>('/api/notes/personas')
+
+export async function savePersona(payload: {
+  id?: string
+  name: string
+  prompt: string
+}): Promise<Persona> {
+  const response = await fetch(`${API_BASE}/api/notes/personas`, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify(payload),
+  })
+  if (!response.ok) throw new Error(`保存人设失败 HTTP ${response.status}`)
+  return ((await response.json()) as { item: Persona }).item
+}
+
+export async function deletePersona(id: string): Promise<void> {
+  const response = await fetch(`${API_BASE}/api/notes/personas/${encodeURIComponent(id)}`, {
+    method: 'DELETE',
+  })
+  if (!response.ok) throw new Error(`删除人设失败 HTTP ${response.status}`)
+}
+
+export const fetchAiNotes = () => getJson<{ items: AiNote[] }>('/api/notes/ai')
+
+export async function generateAiNote(personaId: string, date?: string): Promise<AiNote> {
+  const response = await fetch(`${API_BASE}/api/notes/ai/generate`, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ persona_id: personaId, date: date ?? null }),
+  })
+  if (!response.ok) throw new Error(`生成失败 HTTP ${response.status}`)
+  return (await response.json()) as AiNote
+}
+
+export async function deleteAiNote(date: string): Promise<void> {
+  const response = await fetch(`${API_BASE}/api/notes/ai/${encodeURIComponent(date)}`, {
+    method: 'DELETE',
+  })
+  if (!response.ok) throw new Error(`删除笔记失败 HTTP ${response.status}`)
+}
+
+/* 模型设置：开源用户在自己的机器上填接口 / Key；保存到 assistant_config.json 后立即生效 */
+
+export interface AssistantConfig {
+  configured: boolean
+  provider: string
+  base_url: string
+  model: string
+  /** 只回显前 6 位的掩码（如 sk-abc***）；提交时留空 = 不修改 */
+  api_key_masked: string
+  source: 'file' | 'env' | 'none' | string
+  config_path: string
+}
+
+export interface AssistantConfigIn {
+  provider: 'openai' | 'ollama' | 'mock'
+  base_url: string
+  api_key: string
+  model: string
+}
+
+export const fetchAssistantConfig = () => getJson<AssistantConfig>('/api/assistant/config')
+
+export async function saveAssistantConfig(
+  payload: AssistantConfigIn,
+): Promise<{ ok: boolean; provider_label: string }> {
+  const response = await fetch(`${API_BASE}/api/assistant/config`, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify(payload),
+  })
+  if (!response.ok) {
+    const detail = (await response.json().catch(() => null)) as { detail?: string } | null
+    throw new Error(detail?.detail ?? `保存失败 HTTP ${response.status}`)
+  }
+  return (await response.json()) as { ok: boolean; provider_label: string }
+}
+
+export async function testAssistantConfig(
+  payload: AssistantConfigIn,
+): Promise<{ ok: boolean; detail: string }> {
+  const response = await fetch(`${API_BASE}/api/assistant/config/test`, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify(payload),
+  })
+  if (!response.ok) throw new Error(`测试失败 HTTP ${response.status}`)
+  return (await response.json()) as { ok: boolean; detail: string }
+}

@@ -41,24 +41,29 @@ C 档（aggregate，默认）**不注入**明细工具 —— 对端 IP 物理�
 
 from __future__ import annotations
 
+import asyncio
 import json
 import os
 import re
 import sqlite3
 import time
+import urllib.error
 import urllib.parse
 import urllib.request
 from contextlib import contextmanager
 from dataclasses import dataclass, field
 from pathlib import Path
-from typing import Any, Callable, Iterator
+from typing import Any, Callable, Iterator, Literal
 
-from fastapi import APIRouter
+from fastapi import APIRouter, HTTPException
 from fastapi.responses import StreamingResponse
 from pydantic import BaseModel, Field, ValidationError
 
 SCHEMA = "flowwatch-assistant/v1"
 MEMORY_PATH = Path(__file__).with_name("assistant_memory.db")
+# UI「模型设置」的落盘位置（含 API key，必须在 .gitignore 内）；
+# 文件不存在时 load_config 静默回退环境变量 / 项目 .env。
+CONFIG_PATH = Path(__file__).with_name("assistant_config.json")
 
 MAX_TURNS = 6                # 一轮提问最多几次模型往返（含工具轮）
 RECENT_MESSAGES = 10         # 注入上下文的最近消息条数
@@ -731,23 +736,98 @@ class ProviderConfig:
 UNCONFIGURED = ProviderConfig(name="none", label="未配置", base_url="", api_key="", model="")
 
 
+_ENV_FILE_LOADED = False
+
+
+def _read_config_file() -> dict[str, str]:
+    """读 UI 保存的配置；不存在/损坏都返回空字典（静默回退 env，不打断服务）。"""
+    try:
+        data = json.loads(CONFIG_PATH.read_text(encoding="utf-8"))
+    except Exception:
+        return {}
+    if not isinstance(data, dict):
+        return {}
+    return {k: v.strip() for k, v in data.items() if isinstance(v, str) and v.strip()}
+
+
+def _mask_key(key: str) -> str:
+    """API key 只回显前 6 位（前端据此实现"留空 = 不修改"）。"""
+    if not key:
+        return ""
+    return f"{key[:6]}***" if len(key) > 6 else "***"
+
+
+def _load_env_file_once() -> None:
+    """可选：从项目内 .env 加载 FLOWWATCH_ASSISTANT_*（零依赖；不覆盖已有环境变量）。
+
+    便于把 provider/key 配置留在项目里，而不污染用户级环境变量。
+    注意：.env 含 API key，必须在 .gitignore 内。
+    """
+    global _ENV_FILE_LOADED
+    if _ENV_FILE_LOADED:
+        return
+    _ENV_FILE_LOADED = True
+    path = Path(__file__).with_name(".env")
+    if not path.exists():
+        return
+    for line in path.read_text(encoding="utf-8", errors="ignore").splitlines():
+        line = line.strip()
+        if not line or line.startswith("#") or "=" not in line:
+            continue
+        key, _, value = line.partition("=")
+        key = key.strip()
+        if key and key not in os.environ:
+            os.environ[key] = value.strip().strip('"').strip("'")
+
+
 def load_config() -> ProviderConfig:
-    name = (os.environ.get("FLOWWATCH_ASSISTANT_PROVIDER") or "").strip().lower()
-    model = (os.environ.get("FLOWWATCH_ASSISTANT_MODEL") or "").strip()
+    """配置优先级：UI 保存文件（assistant_config.json）> 环境变量 / 项目 .env。
+
+    开源用户第一次打开页面时没有任何配置 —— 用页面里的「模型设置」写文件即可生效，
+    不必再折腾环境变量；部署方仍可用环境变量做无人值守配置（逐字段回退）。
+    """
+    _load_env_file_once()
+    saved = _read_config_file()
+
+    def pick(field: str, env_name: str, default: str = "") -> str:
+        return saved.get(field) or (os.environ.get(env_name) or "").strip() or default
+
+    name = pick("provider", "FLOWWATCH_ASSISTANT_PROVIDER").lower()
+    model = pick("model", "FLOWWATCH_ASSISTANT_MODEL")
     if name == "mock":
         return ProviderConfig("mock", "本地 mock（不联网，仍真跑工具）", "", "", model or "mock")
     if name == "openai":
-        base = (os.environ.get("FLOWWATCH_ASSISTANT_BASE_URL") or "").strip().rstrip("/")
-        key = (os.environ.get("FLOWWATCH_ASSISTANT_API_KEY") or "").strip()
+        base = pick("base_url", "FLOWWATCH_ASSISTANT_BASE_URL").rstrip("/")
+        key = pick("api_key", "FLOWWATCH_ASSISTANT_API_KEY")
         if not (base and key and model):
             return UNCONFIGURED
         return ProviderConfig("openai", f"远端 · {model}", base, key, model)
     if name == "ollama":
-        base = (os.environ.get("FLOWWATCH_ASSISTANT_OLLAMA_URL")
-                or "http://127.0.0.1:11434/v1").strip().rstrip("/")
+        base = pick("base_url", "FLOWWATCH_ASSISTANT_OLLAMA_URL",
+                    "http://127.0.0.1:11434/v1").rstrip("/")
         return ProviderConfig("ollama", f"本地 Ollama · {model or '未指定模型'}", base, "ollama",
                               model or "qwen2.5:7b")
     return UNCONFIGURED
+
+
+def _opener() -> urllib.request.OpenerDirector:
+    """代理策略：**默认直连**。
+
+    踩过的坑：本机全局设了 http_proxy / https_proxy = 127.0.0.1:7890（Clash 之类），
+    代理没开时 urllib 会照着环境变量去连它 —— 连国内 API（如 dashscope）也会被挡下，
+    报出来的还是 127.0.0.1 连接失败，很容易误判成"服务挂了"。
+    需要走代理访问 OpenAI 的场景，显式配置：
+        FLOWWATCH_ASSISTANT_PROXY=env          # 尊重环境变量里的代理
+        FLOWWATCH_ASSISTANT_PROXY=http://127.0.0.1:7890
+    """
+    setting = (os.environ.get("FLOWWATCH_ASSISTANT_PROXY") or "").strip()
+    if not setting:
+        return urllib.request.build_opener(urllib.request.ProxyHandler({}))
+    if setting.lower() == "env":
+        return urllib.request.build_opener()
+    return urllib.request.build_opener(
+        urllib.request.ProxyHandler({"http": setting, "https": setting})
+    )
 
 
 def _post_json(url: str, payload: dict[str, Any], headers: dict[str, str],
@@ -757,13 +837,7 @@ def _post_json(url: str, payload: dict[str, Any], headers: dict[str, str],
         url, data=body, method="POST",
         headers={"Content-Type": "application/json", **headers},
     )
-    # 本机代理常常没开：对本机地址强制直连；远端则尊重环境里的代理设置
-    host = urllib.parse.urlparse(url).hostname
-    if host in ("127.0.0.1", "localhost", "::1"):
-        opener = urllib.request.build_opener(urllib.request.ProxyHandler({}))
-    else:
-        opener = urllib.request.build_opener()
-    with opener.open(request, timeout=timeout) as response:
+    with _opener().open(request, timeout=timeout) as response:
         return json.loads(response.read().decode("utf-8"))
 
 
@@ -1043,6 +1117,98 @@ async def assistant_status() -> dict[str, Any]:
         "privacy": "只发送聚合元数据（进程名/域名/字节数）；对端 IP 明细仅在问题明确要求时"
                    "进入模型上下文。用 ollama 或 mock 则零外发。",
     }
+
+
+class ConfigIn(BaseModel):
+    """UI「模型设置」表单：api_key 留空或掩码（sk-abc***）= 保留已保存的 key。"""
+    provider: Literal["openai", "ollama", "mock"]
+    base_url: str = Field("", max_length=500)
+    api_key: str = Field("", max_length=500)
+    model: str = Field("", max_length=200)
+
+
+def _resolve_key(raw: str) -> str:
+    """表单空值/掩码视为"不修改"，沿用已保存或环境变量里的 key。"""
+    if raw and not raw.endswith("***"):
+        return raw
+    return _read_config_file().get("api_key", "") or (os.environ.get("FLOWWATCH_ASSISTANT_API_KEY") or "").strip()
+
+
+def _candidate(provider: str, base_url: str, api_key: str, model: str) -> ProviderConfig:
+    """把表单值拼成候选配置（不落盘），供保存前的「测试连接」使用。"""
+    provider = provider.strip().lower()
+    if provider == "mock":
+        return ProviderConfig("mock", "本地 mock（不联网，仍真跑工具）", "", "", model or "mock")
+    if provider == "ollama":
+        return ProviderConfig("ollama", f"本地 Ollama · {model or '未指定模型'}",
+                              (base_url or "http://127.0.0.1:11434/v1").rstrip("/"), "ollama",
+                              model or "qwen2.5:7b")
+    return ProviderConfig("openai", f"远端 · {model}", base_url.rstrip("/"), api_key, model)
+
+
+def _ping(config: ProviderConfig) -> dict[str, Any]:
+    """发一句最小请求验证连通性；HTTP 错误把响应体读出来（如配额/权限提示）。"""
+    if config.name == "mock":
+        return {"ok": True, "detail": "mock 模式不联网，始终可用"}
+    try:
+        result = chat_completion(config, [{"role": "user", "content": "回复两个字：连通"}], [])
+    except urllib.error.HTTPError as exc:
+        try:
+            body = exc.read().decode("utf-8", "replace")[:300]
+        except Exception:
+            body = ""
+        return {"ok": False, "detail": f"HTTP {exc.code}: {body or exc.reason}"}
+    except Exception as exc:  # noqa: BLE001 - 失败原因如实回给设置面板
+        return {"ok": False, "detail": f"{type(exc).__name__}: {exc}"}
+    text = (result.get("content") or "").strip()[:80]
+    return {"ok": True, "detail": f"连通成功：{text or '(空响应)'}"}
+
+
+@router.get("/api/assistant/config")
+async def assistant_config_get() -> dict[str, Any]:
+    """当前生效配置（key 只给掩码）。"""
+    config = load_config()
+    saved = _read_config_file()
+    env_set = bool((os.environ.get("FLOWWATCH_ASSISTANT_PROVIDER") or "").strip())
+    return {
+        "configured": config.configured,
+        "provider": config.name if config.configured else "",
+        "base_url": config.base_url,
+        "model": config.model,
+        "api_key_masked": "" if config.api_key in ("", "ollama") else _mask_key(config.api_key),
+        "source": "file" if saved else ("env" if env_set else "none"),
+        "config_path": str(CONFIG_PATH),
+    }
+
+
+@router.post("/api/assistant/config")
+async def assistant_config_save(payload: ConfigIn) -> dict[str, Any]:
+    """保存 UI 配置并立即生效（load_config 每次直读文件，无需重启服务）。"""
+    provider = payload.provider
+    api_key = _resolve_key(payload.api_key.strip())
+    base_url = payload.base_url.strip().rstrip("/")
+    model = payload.model.strip()
+    if provider == "openai" and not (base_url and api_key and model):
+        raise HTTPException(status_code=400,
+                            detail="openai 模式需要填齐 Base URL / API Key / 模型名")
+    if provider == "ollama":
+        base_url = base_url or "http://127.0.0.1:11434/v1"
+        model = model or "qwen2.5:7b"
+    CONFIG_PATH.write_text(
+        json.dumps({"provider": provider, "base_url": base_url,
+                    "api_key": api_key, "model": model}, ensure_ascii=False, indent=2) + "\n",
+        encoding="utf-8",
+    )
+    config = load_config()
+    return {"ok": True, "configured": config.configured, "provider_label": config.label}
+
+
+@router.post("/api/assistant/config/test")
+async def assistant_config_test(payload: ConfigIn) -> dict[str, Any]:
+    """保存前试连：用表单里的候选配置发一句最小请求（不落盘）。"""
+    config = _candidate(payload.provider, payload.base_url,
+                        _resolve_key(payload.api_key.strip()), payload.model.strip())
+    return await asyncio.to_thread(_ping, config)
 
 
 @router.post("/api/assistant/chat")

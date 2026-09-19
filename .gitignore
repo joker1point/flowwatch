@@ -53,3 +53,17 @@ dist/
 *.swp
 .DS_Store
 Thumbs.db
+
+# 含 API key，勿提交
+.env
+
+# UI 保存的模型配置（含 API key，勿提交）
+assistant_config.json
+
+# 笔记区运行期数据：用户便签 + AI 生成的真实流量画像（含真实进程/域名/IP）
+# 三个文件都由 notes.py 首次启动时自动生成（内置人格写在代码 BUILTIN_PERSONAS 里），
+# 目录也会自动创建，因此整个目录都不入库
+notes/
+
+# 临时备份文件（例：assistant.py.bak-flowwatch-ai）
+*.bak-*

@@ -213,6 +213,15 @@ print("\n=== provider 配置读取 ===")
 saved = {k: os.environ.get(k) for k in (
     "FLOWWATCH_ASSISTANT_PROVIDER", "FLOWWATCH_ASSISTANT_BASE_URL",
     "FLOWWATCH_ASSISTANT_API_KEY", "FLOWWATCH_ASSISTANT_MODEL")}
+# 隔离两个外部配置源：load_config 的优先级是 文件 > 环境变量 > .env，
+# 开发机上真实存在的配置会压过下面所有 setenv（CI 上没这些文件，所以这个坑只在本地暴露）：
+#   ① assistant_config.json（UI 保存的模型配置）→ 指向一个不存在的路径；
+#   ② 项目 .env（首启会注入缺失的环境变量）→ 标记为"已加载"阻断它。
+# 恢复放在第 8 段之后：端到端那轮同样要隔离，否则会用真实 provider 真发请求。
+_saved_config_path = assistant.CONFIG_PATH
+_saved_env_loaded = assistant._ENV_FILE_LOADED
+assistant.CONFIG_PATH = Path(tempfile.gettempdir()) / "flowwatch-no-such-config.json"
+assistant._ENV_FILE_LOADED = True
 try:
     os.environ.pop("FLOWWATCH_ASSISTANT_PROVIDER", None)
     check("未配置时 provider=none", assistant.load_config().name, "none")
@@ -255,6 +264,10 @@ with tempfile.TemporaryDirectory() as tmp:
     check("done 带数据档位", done["scope"], "aggregate")
     check("done 报告记忆状态", "blocks" in done["memory"], True)
     check("问答都写进了记忆", len(assistant.MEMORY.history("turn-session", 5)), 2)
+
+# 恢复第 7 段之前设的配置隔离（该段的 finally 只负责环境变量）
+assistant.CONFIG_PATH = _saved_config_path
+assistant._ENV_FILE_LOADED = _saved_env_loaded
 
 print(f"\n{'全部通过' if not FAILURES else '失败项: ' + ', '.join(FAILURES)}")
 raise SystemExit(1 if FAILURES else 0)

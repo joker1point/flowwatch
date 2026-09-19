@@ -110,7 +110,7 @@ device=\Device\NPF_{4FC5DA1D-...}  端点表 6299 个（刷新 203 ms）
 ### 三段实测，每段都有对照
 
 1. **混杂模式会顺手偷别人的流量**。第一版 `pcap_open_live(..., promisc=1)`，抓到了
-   `10.44.79.68:137 → 10.44.255.255:137`、`10.44.191.174:52010 → 10.44.255.255:5684` 这类
+   `10.x.x.x:137 → 10.x.255.255:137`、`10.x.x.x:52010 → 10.x.255.255:5684` 这类（网段已脱敏）
    同网段邻居的 NetBIOS/多播广播 —— 它们既不该算本机流量，也不该算本机"归因失败"。
    改成 `promisc=0` + **本机地址白名单**（接口地址集合，随端点表一起刷新，VPN 重连也能跟上）。
 2. **"未归因"不是一件事，是三件事**。给 `pid_of` 插桩（`scripts/diag_miss.py`）才看清：
@@ -238,7 +238,7 @@ EVENT_TRACE_HEADER  我 56 字节   /  参照物 48   →  EVENT_TRACE 我 96 / 
      EVENT_TRACE_LOGFILE 448/448 · EventRecordCallback 偏移 424/424            → 全部一致
 【1】pywintrace 基线 10s：85 条事件 {12:13, 13:63, 15:9}                        → 环境/provider/权限正常
 【2】flowwatch 实现 10s：state=running events=60 learned=17 forgotten=43 sanity_failures=0
-     10.44.99.5:51953 -> 61.151.230.245:47873  归因 PID=23968                 → 真正收到并归因
+     10.x.x.x:51953 -> 61.151.230.245:47873  归因 PID=23968                  → 真正收到并归因
 ```
 
 `sanity_failures=0` 值得单独说：那条校验要求"本机侧地址必须真属于本机"，它零失败意味着
@@ -511,6 +511,7 @@ wpcap），装 LangGraph 会拖进 httpx 一整棵依赖树，对本机小工具
 | `FLOWWATCH_ASSISTANT_PROVIDER` | `openai`（任意 OpenAI 兼容 API）/ `ollama`（本地，零外发）/ `mock`（不联网，仍真跑工具） |
 | `FLOWWATCH_ASSISTANT_BASE_URL` `_API_KEY` `_MODEL` | 远端兼容 API 的地址 / key / 模型名 |
 | `FLOWWATCH_ASSISTANT_OLLAMA_URL` | 默认 `http://127.0.0.1:11434/v1` |
+| `FLOWWATCH_ASSISTANT_PROXY` | 代理策略：**默认直连**（国内 API 正确）；设 `env` 尊重环境变量；或给具体代理 URL（访问 OpenAI 这类需要代理时用） |
 
 不配也能跑：面板会提示未配置，演示包默认 `mock` —— 链路（工具调用 + 记忆写入）照样走一遍，
 输出里明确标注 mock 模式，不会假装那是模型回答。

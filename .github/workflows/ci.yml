@@ -8,6 +8,11 @@ on:
 permissions:
   contents: read
 
+# 测试脚本用中文打印用例名。Windows runner 的默认 stdout 编码不是 UTF-8，
+# 不设这个会直接 UnicodeEncodeError 挂掉（本地是中文 Windows，所以本地跑不出来）。
+env:
+  PYTHONIOENCODING: utf-8
+
 jobs:
   # Windows 全量：抓包（Npcap 的 wpcap.dll）、ETW（advapi32）、IP Helper（iphlpapi）
   # 都是 Windows 专属接口 —— 这些脚本在本平台上跑才算"真环境"。

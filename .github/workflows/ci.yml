@@ -45,6 +45,9 @@ jobs:
       - name: ETW 批量解析层 · test_etw_batch
         run: python tests/test_etw_batch.py
 
+      - name: 流量助手 · test_assistant
+        run: python tests/test_assistant.py
+
   # Linux 只跑与平台无关的两个（ETW / 抓包层在 Linux 上本来就跑不了，不假装能跑）
   tests-linux:
     name: 跨平台测试 · ubuntu · py3.13
@@ -56,11 +59,17 @@ jobs:
         with:
           python-version: "3.13"
 
+      - name: 安装依赖
+        run: pip install -r requirements.txt
+
       - name: 解析层（纯标准库：socket / struct）
         run: python tests/test_names.py
 
       - name: 历史层（纯标准库：sqlite3 + threading + queue）
         run: python tests/test_domain_history.py
+
+      - name: 流量助手（pydantic 契约 + sqlite3 记忆层）
+        run: python tests/test_assistant.py
 
   # 前端构建 = tsc --noEmit（类型检查）+ vite build。
   # VITE_API_BASE=/ 与演示包同口径：产物以相对路径请求 API，可直接交给单端口包装层。

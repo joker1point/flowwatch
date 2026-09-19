@@ -196,6 +196,28 @@ export interface ProcessTop {
   last_seen: string
 }
 
+/** 流量助手的长期记忆块（对齐 Letta 的 Memory Block：label 寻址 + 容量契约）。 */
+export interface AssistantBlock {
+  label: string
+  description: string
+  value: string
+  limit: number
+  read_only: boolean
+  chars_current: number
+}
+
+export interface AssistantStatus {
+  schema: string
+  configured: boolean
+  provider: string
+  provider_label: string
+  model: string
+  routing: { default_scope: string; detail_triggers: string[] }
+  tools: { name: string; scope: string; description: string }[]
+  memory: { sessions: number; messages: number; compacted: number; blocks: AssistantBlock[] }
+  privacy: string
+}
+
 export type EventKind = 'appear' | 'vanish' | 'spike'
 
 export interface ChangeEvent {

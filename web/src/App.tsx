@@ -1,5 +1,6 @@
 import { useEffect, useMemo, useState } from 'react'
 import { fetchEvents, fetchHealth, fetchProcessHistory, fetchTopDomains } from './api'
+import { AssistantPanel } from './components/AssistantPanel'
 import { ConnDetail } from './components/ConnDetail'
 import { DomainList } from './components/DomainList'
 import { EventFeed } from './components/EventFeed'
@@ -222,6 +223,7 @@ export default function App() {
         </div>
 
         <div className="column">
+          <AssistantPanel />
           <ThroughputChart history={throughput} />
           <ConnDetail row={selected} />
           <HistoryPanel

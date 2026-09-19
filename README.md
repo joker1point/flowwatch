@@ -70,6 +70,11 @@ device=\Device\NPF_{4FC5DA1D-...}  端点表 6299 个（刷新 203 ms）
 只统计**元数据**（IP / 端口 / 字节数 / 包数），**不保存包体**；snaplen 限 2048 字节、抓包线程只解析头部。
 这条边界写在设计里，也写在文档里——它同时也是"不越权"的技术约束。
 
+**接了流量助手（见《流量助手》）之后这条边界怎么延续**：助手默认只把**聚合元数据**
+（进程名 / 域名 / 字节数）发出去；对端 IP:端口这类明细**只在你明确问"连了谁 / 哪个 IP /
+端口明细"时才进入上下文**，而且实现方式是"明细工具在聚合档下压根不注入给模型"——
+物理隔离，不是提示词承诺。用本地 Ollama 或 mock 模式则零外发。
+
 ## 已知成本（实测）与待优化
 
 | 项 | 实测 | 计划 |
@@ -462,6 +467,53 @@ GET /api/history/domains?minutes=60&limit=20&named_only=true
 > 已验证：重启后 packets 0 → 2 万+、`last_packet_ts` 实时刷新、历史库恢复写今日桶。
 > **自愈路径本身尚待实战触发**（需要下一次真实的网络重连）——
 > `reopen_count` 是否上涨就是它的成绩单。
+
+## 流量助手：面板里能问的只读 Agent
+
+界面右列有个「流量助手」面板：随时问本机流量的问题（谁在占带宽、某个进程为什么异常、
+某个域名连了多少），回答**只基于 flowwatch 自己采到的数据**，查不到就说查不到。
+
+### 结构不是自己拍的：三份成熟实现的设计被直接对齐
+
+只借鉴设计、不引入框架 —— 本项目依赖只有 psutil / fastapi / uvicorn（抓包都是 ctypes 直调
+wpcap），装 LangGraph 会拖进 httpx 一整棵依赖树，对本机小工具不划算。
+
+| 借鉴自 | 用在什么地方 |
+|---|---|
+| **Letta / MemGPT** 的 Context Hierarchy | 记忆分三层：热状态 **Memory Block**（`human` / `watchlist` / `findings`，每轮注入）、**会话证据**（原始消息，压缩只做标记、**不删原文**，可检索 —— 对抗摘要漂移）、长期事实走 block 而不另起一层（要记的结论量小，不为分层而分层） |
+| Letta 的 **Prompt ABI** | 块渲染成 `<memory_blocks>` 结构，把 `chars_current / chars_limit` 一并给模型 —— 让它对预算有感知，主动合并整理而不是硬塞 |
+| Letta 的 **变更原语** | `memory_replace`（精确小改，要求逐字唯一）/ `memory_insert`（追加）/ `memory_rethink`（整块重写）三种粒度，不允许一个"写记忆"通吃 |
+| **Pydantic AI** | 工具契约由 Pydantic 模型生成 schema、description 取自 docstring、**参数校验失败作为观察结果回给模型**而不是抛异常 |
+| **OpenAI Agents SDK** | 会话抽象（消息持久化 + 自动拼装输入）、`max_turns` 上限、工具异常不中断回合、工具执行过程作为可观测步骤流 |
+
+### 工具（11 个，全部只读）
+
+| 类别 | 工具 |
+|---|---|
+| 实时 | `get_live_frame`、`get_live_connections`（**仅明细档**） |
+| 历史 | `get_top_processes`、`get_top_domains`、`get_process_history`、`get_events` |
+| 状态 | `get_health` |
+| 记忆 | `memory_insert`、`memory_replace`、`memory_rethink`、`conversation_search` |
+
+没有任何写监控状态的工具 —— Agent 不能停采集、不能改配置。
+
+### 数据分级：物理隔离，不是提示词承诺
+
+- **聚合档（默认）**：模型能看到的只有聚合数据，明细工具**压根不在工具列表里** ——
+  "把对端 IP 发出去"在这一档下**做不到**，而不是"嘱咐它别做"；
+- **明细档**：问题里出现"对端 / 连了谁 / 哪个 IP / 端口 / 明细"等意图时才升档；
+- 面板上标明每次回答用的是哪一档，`/api/assistant/status` 会把分级规则和工具清单都吐出来。
+
+### 配置
+
+| 环境变量 | 说明 |
+|---|---|
+| `FLOWWATCH_ASSISTANT_PROVIDER` | `openai`（任意 OpenAI 兼容 API）/ `ollama`（本地，零外发）/ `mock`（不联网，仍真跑工具） |
+| `FLOWWATCH_ASSISTANT_BASE_URL` `_API_KEY` `_MODEL` | 远端兼容 API 的地址 / key / 模型名 |
+| `FLOWWATCH_ASSISTANT_OLLAMA_URL` | 默认 `http://127.0.0.1:11434/v1` |
+
+不配也能跑：面板会提示未配置，演示包默认 `mock` —— 链路（工具调用 + 记忆写入）照样走一遍，
+输出里明确标注 mock 模式，不会假装那是模型回答。
 
 ## 复现与验证（脚本都在仓库里）
 

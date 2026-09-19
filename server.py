@@ -37,6 +37,7 @@ from fastapi import FastAPI, Query, Request
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import StreamingResponse
 
+import assistant
 import collector
 import history
 
@@ -213,6 +214,9 @@ capturer = collector.Capturer()
 hub = RateHub(capturer)
 store = history.HistoryStore(HISTORY_DB)
 
+# 流量助手：把只读数据入口注入进去，它自己管工具分级、记忆层与 provider 配置
+assistant.configure(hub=hub, store=store, capturer=capturer)
+
 
 async def _start_capturer() -> None:
     """在后台启动采集层。
@@ -260,6 +264,7 @@ app.add_middleware(
     allow_methods=["*"],
     allow_headers=["*"],
 )
+app.include_router(assistant.router)
 
 
 def sse(event: str, payload: Any) -> str:

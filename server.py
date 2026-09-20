@@ -47,6 +47,7 @@ import notes
 
 logger = logging.getLogger("flowwatch.server")
 
+VERSION = "1.0.0"           # 对外版本（/api/meta 暴露；发版时与 git tag 一起改）
 HOST = "127.0.0.1"
 PORT = 8788
 HISTORY_DB = Path(__file__).with_name("history.db")   # 与项目同目录，便于连同库一起备份
@@ -325,6 +326,7 @@ def health() -> dict[str, Any]:
 @app.get("/api/meta")
 async def meta() -> dict[str, Any]:
     return {
+        "version": VERSION,
         "schema": collector.SCHEMA,
         "flush_interval": FLUSH_INTERVAL,
         "top_n": TOP_N,

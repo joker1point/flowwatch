@@ -1,6 +1,8 @@
 # flowwatch
 
 ![ci](https://github.com/joker1point/flowwatch/actions/workflows/ci.yml/badge.svg)
+![version](https://img.shields.io/badge/version-1.0.0-blue)
+![license](https://img.shields.io/badge/license-MIT-green)
 
 > 回答一个任务管理器回答不了的问题：**这台机器上，哪个进程在跟谁通信、用了多少带宽、从什么时候开始的。**
 

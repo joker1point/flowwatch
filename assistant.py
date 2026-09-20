@@ -42,10 +42,12 @@ C 档（aggregate，默认）**不注入**明细工具 —— 对端 IP 物理�
 from __future__ import annotations
 
 import asyncio
+import ctypes
 import json
 import os
 import re
 import sqlite3
+import sys
 import time
 import urllib.error
 import urllib.parse
@@ -55,6 +57,7 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any, Callable, Iterator, Literal
 
+import psutil
 from fastapi import APIRouter, HTTPException
 from fastapi.responses import StreamingResponse
 from pydantic import BaseModel, Field, ValidationError
@@ -69,6 +72,33 @@ MAX_TURNS = 6                # 一轮提问最多几次模型往返（含工具�
 RECENT_MESSAGES = 10         # 注入上下文的最近消息条数
 COMPACT_THRESHOLD = 28       # 超过这么多条就把更早的标记为已压缩（**不删除**）
 HTTP_TIMEOUT = 90.0
+
+# 首轮"零工具调用"兜底。背景（2026-09-20 实测事故）：用户问"doubao 收发的是心跳包吗"，
+# 模型一次工具都没调，直接编出"我查了实时帧 / 排行榜 / 事件流，都没有"整段结论，
+# 而服务端当时无条件采信了它（while 循环里 `if not calls: answer = content; break`）。
+# 命中 DATA_INTENT_PATTERNS 说明这问题要的是**本机实际数据**，必须先拿证据再说话。
+DATA_INTENT_PATTERNS = (
+    "进程", "程序", "应用", "域名", "网站", "流量", "带宽", "网速", "速率", "排行", "排名",
+    "占用", "谁在", "哪个", "哪些", "连接", "事件", "心跳", "端口", "上传", "下载",
+    "发送", "接收", "丢包", "延迟", "未归因", "字节", "dns", ".exe", ".com", "ip",
+)
+GROUNDING_NUDGE = (
+    "（内部提示，用户看不到）你刚才没有调用任何工具就作答，涉及本机数据的结论没有依据，"
+    "那份草稿已经作废、不会展示给用户，也不要提起它或检讨它。"
+    "请直接重新作答：先调用需要的工具（用户点名了进程或域名就用 match 参数在全量数据里检索），"
+    "拿不到数据就明确说没查到，不要编造查询过程。"
+    "如果这其实是纯概念问题、不涉及本机数据，请说明这一点后再作答。"
+)
+UNVERIFIED_NOTE = "⚠️ 本轮未调用任何工具核实，以下内容没有本机数据支撑：\n\n"
+# 只有取数据的工具（get_*）算"证据"。记忆类工具（memory_* / conversation_search）不产生任何
+# 本机数据 —— 实测：模型只调 memory_insert 就顺带编出"Tabbit 占出向带宽 62%"，当时 grounded 还是 True。
+DATA_TOOL_PREFIX = "get_"
+
+
+def needs_evidence(question: str) -> bool:
+    """问题是否在要"本机实际数据"：决定零工具调用时要不要强制纠正一轮。"""
+    text = (question or "").lower()
+    return any(pattern in text for pattern in DATA_INTENT_PATTERNS)
 
 # ---------------------------------------------------------------- 数据分级
 
@@ -95,6 +125,7 @@ class _Source:
     store: Any = None
     capturer: Any = None
     session_id: str = "default"     # 由请求设置，供记忆类工具定位会话
+    scope: str = "aggregate"        # 当前数据档位：决定哪些字段可以出到模型上下文
 
 
 def configure(hub: Any = None, store: Any = None, capturer: Any = None,
@@ -284,6 +315,20 @@ class Memory:
             row = conn.execute("SELECT summary FROM sessions WHERE id=?", (session_id,)).fetchone()
         return row[0] if row else ""
 
+    def times_asked(self, session_id: str, question: str) -> int:
+        """这句问题在本会话里问过几次（含刚写入的这一次）。
+
+        用途：重复提问 = 上次的回答没被接受。实测过模型会复读自己上一轮的工具选择与结论
+        （同一句"现在谁在占带宽"问两遍，它第二遍仍只查记忆里记着的那两个对象），
+        所以这里给一个**确定性的信号**，而不是指望提示词把它劝住。
+        """
+        with self._conn() as conn:
+            row = conn.execute(
+                "SELECT COUNT(*) FROM messages WHERE session_id=? AND role='user' AND content=?",
+                (session_id, question),
+            ).fetchone()
+        return int(row[0]) if row else 0
+
     def append(self, session_id: str, role: str, content: str, scope: str = "",
                tools: tuple[str, ...] = ()) -> None:
         now = int(time.time())
@@ -393,18 +438,38 @@ class GetLiveFrameArgs(BaseModel):
 
 
 class GetTopProcessesArgs(BaseModel):
-    """区间内按累计字节排行的进程（只统计 pid > 0，不含哨兵桶）。"""
+    """区间内按累计字节排行的进程（只统计 pid > 0，不含哨兵桶）。用户点名某个进程时必须用 match 检索全量数据，不要只在排行榜里扫一眼。"""
 
     minutes: int = Field(60, ge=1, le=60 * 24 * 30, description="回看多少分钟，默认 60")
     limit: int = Field(10, ge=1, le=20, description="返回条数")
+    match: str | None = Field(
+        None,
+        description="按进程名检索（不区分大小写的子串：小写 doubao 能命中 Doubao.exe）。"
+                    "给了它就在全量数据里找、并按进程名合并，不受 limit 截断；"
+                    "返回 matched=false 表示这段时间它没有流量记录 —— 不等于进程不存在。"
+                    "**注意：它只按名字过滤**，问'谁占带宽最多'这种全局问题别传 match，"
+                    "那会把答案缩成只看这一个对象",
+    )
+    group: bool = Field(
+        True,
+        description="按进程名合并同名多进程（默认开）。Electron 类应用常跑十几个同名进程，"
+                    "按 pid 会被拆成十几行，单个 pid 甚至挤不进榜",
+    )
 
 
 class GetTopDomainsArgs(BaseModel):
-    """区间内的域名排行（含 kind=ip 的未识别来源）。"""
+    """区间内的域名排行（含 kind=ip 的未识别来源）。用户点名某个域名或服务时用 match 检索。"""
 
     minutes: int = Field(60, ge=1, le=60 * 24 * 30)
     limit: int = Field(10, ge=1, le=20)
     named_only: bool = Field(False, description="只看有域名的")
+    match: str | None = Field(
+        None,
+        description="按**域名名**检索（不区分大小写的子串：小写 doubao 能命中 logifier.doubao.com）。"
+                    "过滤发生在排行榜截断之前，命中的条目一定会返回。"
+                    "注意它不等于'某个进程访问过的域名'—— 历史层不保存进程与域名的关联，"
+                    "这条只有明细档的实时窗口（get_live_connections）能看到",
+    )
 
 
 class GetProcessHistoryArgs(BaseModel):
@@ -416,10 +481,19 @@ class GetProcessHistoryArgs(BaseModel):
 
 
 class GetEventsArgs(BaseModel):
-    """变化事件流（出现 / 消失 / 尖峰），由落库观测值派生。"""
+    """变化事件流（出现 / 消失 / 尖峰），由落库观测值派生。问"某个应用最近有没有异常"用 match，别用 pid。"""
 
     limit: int = Field(20, ge=1, le=50)
-    pid: int | None = Field(None, description="只看某个进程")
+    pid: int | None = Field(None, description="只看某个进程实例（pid 会变，一般用 match 更稳）")
+    match: str | None = Field(
+        None,
+        description="按进程名过滤（不区分大小写子串：doubao 能命中 Doubao.exe）。"
+                    "事件是稀疏数据，明确窗口才看得出'没有异常'",
+    )
+    minutes: int | None = Field(
+        None, ge=1, le=60 * 24 * 30,
+        description="只看最近多少分钟；不传就是全库最近 limit 条（可能全是别人的事件）",
+    )
 
 
 class GetLiveConnectionsArgs(BaseModel):
@@ -427,6 +501,18 @@ class GetLiveConnectionsArgs(BaseModel):
 
     pid: int = Field(..., ge=1)
     limit: int = Field(10, ge=1, le=20)
+
+
+class GetProcessIdentityArgs(BaseModel):
+    """某个进程到底是哪个软件：exe 的厂商 / 产品名 / 描述 / 版本（完整路径只在明细档给出）。回答"这个进程是什么/谁装的/是不是系统组件"就用它，别靠名字猜。"""
+
+    pid: int | None = Field(None, ge=1, description="进程 PID（从排行或实时帧里拿）")
+    match: str | None = Field(
+        None,
+        description="只知道名字时给名字片段（如 GameViewer）：工具会先按它查到 pid 再读身份信息",
+    )
+    minutes: int = Field(60, ge=1, le=60 * 24 * 30,
+                         description="用 match 找 pid 时的回看窗口，默认 60 分钟")
 
 
 class MemoryInsertArgs(BaseModel):
@@ -558,17 +644,32 @@ def _tool_live_frame(args: GetLiveFrameArgs, _session: str) -> dict[str, Any]:
 def _tool_top_processes(args: GetTopProcessesArgs, _session: str) -> dict[str, Any]:
     if _Source.store is None:
         return {"error": "历史层未就绪"}
-    items = _Source.store.top_processes(minutes=args.minutes, limit=args.limit)
-    return {"minutes": args.minutes, "items": items}
+    items = _Source.store.top_processes(minutes=args.minutes, limit=args.limit,
+                                        match=args.match, group=args.group)
+    payload: dict[str, Any] = {"minutes": args.minutes, "match": args.match, "items": items}
+    if args.match:
+        payload["matched"] = bool(items)
+        payload["note"] = "match 已生效：这是按名字在**全量**数据里检索的结果，不是排行榜前 N 条"
+        if not items:
+            payload["hint"] = (
+                f"近 {args.minutes} 分钟内没有进程名含「{args.match}」的流量记录。"
+                "这只说明「没有流量」，不等于进程没在跑 —— 进程在跑但没有网络活动是两回事，"
+                "不要据此说进程不存在；可以说'归因数据里没有它的流量'。"
+            )
+    return payload
 
 
 def _tool_top_domains(args: GetTopDomainsArgs, _session: str) -> dict[str, Any]:
     if _Source.store is None:
         return {"error": "历史层未就绪"}
     items = _Source.store.top_domains(
-        minutes=args.minutes, limit=args.limit, named_only=args.named_only
+        minutes=args.minutes, limit=args.limit, named_only=args.named_only, match=args.match
     )
-    return {"minutes": args.minutes, "items": items}
+    payload: dict[str, Any] = {"minutes": args.minutes, "match": args.match, "items": items}
+    if args.match:
+        payload["matched"] = bool(items)
+        payload["note"] = "match 已生效：过滤发生在排行截断之前，命中的一定会返回"
+    return payload
 
 
 def _tool_process_history(args: GetProcessHistoryArgs, _session: str) -> dict[str, Any]:
@@ -596,7 +697,22 @@ def _tool_process_history(args: GetProcessHistoryArgs, _session: str) -> dict[st
 def _tool_events(args: GetEventsArgs, _session: str) -> dict[str, Any]:
     if _Source.store is None:
         return {"error": "历史层未就绪"}
-    return {"items": _Source.store.events(limit=args.limit, pid=args.pid)}
+    items = _Source.store.events(limit=args.limit, pid=args.pid,
+                                 match=args.match, minutes=args.minutes)
+    payload: dict[str, Any] = {"minutes": args.minutes, "match": args.match,
+                               "count": len(items), "items": items}
+    if len(items) >= args.limit:
+        payload["truncated"] = True
+        payload["truncated_note"] = (f"只返回了最近 {len(items)} 条（命中 limit），"
+                                     "不是全量 —— 说明情况时要讲清这是样本")
+    if args.match and not items:
+        payload["note"] = (
+            "这段窗口里没有该名字的事件。事件只在「出现 / 消失 / 尖峰」时产生，"
+            "**没有事件 ≠ 没有流量** —— 要说它有流量还是没流量，得另查排行。"
+        )
+    elif not args.minutes:
+        payload["note"] = "没限定时间窗，这只是全库最近的若干条；判断'有没有异常'请带上 minutes 重查。"
+    return payload
 
 
 def _tool_live_connections(args: GetLiveConnectionsArgs, _session: str) -> dict[str, Any]:
@@ -624,14 +740,127 @@ def _tool_live_connections(args: GetLiveConnectionsArgs, _session: str) -> dict[
     }
 
 
+def _version_strings(path: str) -> dict[str, str]:
+    """读 exe 的版本资源：CompanyName / ProductName / FileDescription / FileVersion。
+
+    为什么值得写这段 ctypes：光看进程名判断不了"这是哪个软件"—— `GameViewerServer.exe`
+    实际是「网易UU远程」。版本资源里写着厂商与产品名，是最便宜的身份答案。
+    pywin32 不在依赖里，所以直接调 version.dll；非 Windows 或读不到都返回空字典（fail-closed）。
+    """
+    if sys.platform != "win32":
+        return {}
+    try:
+        from ctypes import wintypes
+
+        version = ctypes.WinDLL("version.dll")
+        version.GetFileVersionInfoSizeW.argtypes = [wintypes.LPCWSTR, ctypes.POINTER(wintypes.DWORD)]
+        version.GetFileVersionInfoSizeW.restype = wintypes.DWORD
+        version.GetFileVersionInfoW.argtypes = [wintypes.LPCWSTR, wintypes.DWORD,
+                                                wintypes.DWORD, ctypes.c_void_p]
+        version.GetFileVersionInfoW.restype = wintypes.BOOL
+        version.VerQueryValueW.argtypes = [ctypes.c_void_p, wintypes.LPCWSTR,
+                                           ctypes.POINTER(ctypes.c_void_p),
+                                           ctypes.POINTER(ctypes.c_uint)]
+        version.VerQueryValueW.restype = wintypes.BOOL
+
+        ignored = wintypes.DWORD()
+        size = version.GetFileVersionInfoSizeW(str(path), ctypes.byref(ignored))
+        if not size:
+            return {}
+        block = ctypes.create_string_buffer(size)
+        if not version.GetFileVersionInfoW(str(path), 0, size, block):
+            return {}
+
+        def probe(sub: str) -> tuple[int, int] | None:
+            pointer = ctypes.c_void_p()
+            length = ctypes.c_uint()
+            if not version.VerQueryValueW(block, sub, ctypes.byref(pointer), ctypes.byref(length)):
+                return None
+            if not pointer.value or not length.value:
+                return None
+            return int(pointer.value), int(length.value)
+
+        # 踩过的坑：VerQueryValueW 返回的长度单位不统一 —— **二进制块按字节，字符串按字符**。
+        # 一开始全按字节读（string_at(ptr, len)）→ "NetEase" 只读到 "NetE"，产品名只读到
+        # "网易UU"（真值「网易UU远程」）。字符串值本身以 NUL 结尾，直接 wstring_at 最稳。
+        hit = probe(r"\VarFileInfo\Translation")
+        translation = ctypes.string_at(hit[0], hit[1]) if hit else b""
+        pairs = [
+            (int.from_bytes(translation[i:i + 2], "little"),
+             int.from_bytes(translation[i + 2:i + 4], "little"))
+            for i in range(0, len(translation) - 3, 4)
+        ] or [(0x0409, 0x04B0)]            # 没有翻译表就用 en-US + Unicode
+        for lang, codepage in pairs:
+            prefix = rf"\StringFileInfo\{lang:04x}{codepage:04x}"
+            got: dict[str, str] = {}
+            for field in ("CompanyName", "ProductName", "FileDescription", "FileVersion"):
+                hit = probe(f"{prefix}\\{field}")
+                got[field] = ctypes.wstring_at(hit[0]).strip() if hit else ""
+            if any(got.values()):
+                return got
+        return {}
+    except Exception:      # 任何异常都只是"读不到身份"，不该打断一轮对话
+        return {}
+
+
+def _tool_process_identity(args: GetProcessIdentityArgs, _session: str) -> dict[str, Any]:
+    pid = args.pid
+    name = ""
+    if pid is None:
+        if not (args.match or "").strip():
+            return {"error": "pid 与 match 至少给一个"}
+        if _Source.store is None:
+            return {"error": "历史层未就绪"}
+        found = _Source.store.top_processes(minutes=args.minutes, limit=1, match=args.match)
+        if not found:
+            return {"pid": None, "match": args.match, "found": False,
+                    "hint": f"近 {args.minutes} 分钟没有进程名含「{args.match}」的流量记录，"
+                            "于是拿不到 pid —— 没有流量不等于进程没在运行"}
+        pid = int(found[0]["pid"])
+        name = str(found[0].get("process") or "")
+    try:
+        proc = psutil.Process(pid)
+        exe = proc.exe()
+        if not name:
+            name = proc.name()
+    except Exception as exc:  # 进程已退出 / 权限不足（服务或提权进程）
+        return {"pid": pid, "process": name, "error": f"{type(exc).__name__}: {exc}",
+                "hint": "拿不到可执行路径：它可能已退出，或跑在更高权限下（服务/提权进程）"}
+    info = _version_strings(exe)
+    payload: dict[str, Any] = {
+        "pid": pid,
+        "process": name,
+        "company": info.get("CompanyName", ""),
+        "product": info.get("ProductName", ""),
+        "description": info.get("FileDescription", ""),
+        "version": info.get("FileVersion", ""),
+    }
+    if _Source.scope == "detail":
+        payload["path"] = exe
+    else:
+        payload["path_note"] = ("完整路径按隐私分级只在明细档给（用户问对端/端口/明细时会升档）；"
+                                "厂商/产品/版本当前档位即可用")
+    if not any(payload[key] for key in ("company", "product", "description")):
+        payload["note"] = "该 exe 没有版本资源（自编译 / 绿色软件常见），只能按名字判断"
+    return payload
+
+
 # ---------------------------------------------------------------- 记忆工具实现
 
 def _tool_memory_insert(args: MemoryInsertArgs, session: str) -> dict[str, Any]:
+    text = args.text.strip()
+    if not text:
+        return {"error": "text 是空的 —— 追加内容要是自包含的一句话"}
     current = MEMORY.block_value(args.label)
-    joined = (current + "\n" + args.text).strip() if current else args.text.strip()
+    # 去重：块每轮都注入给模型看，重复写入只会在预算里灌水（实测过：一句话被写两遍）
+    if text.casefold() in current.casefold():
+        return {"ok": False, "reason": "块里已经有同样内容，未重复写入", "current": current}
+    joined = (current + "\n" + text).strip() if current else text
     result = MEMORY.block_write(args.label, joined)
     if result.get("ok"):
-        result["hint"] = "已追加。块快满时用 memory_rethink 合并同类项，别硬塞。"
+        result["current"] = MEMORY.block_value(args.label)   # 回读：模型能直接核对自己写进去的东西
+        result["hint"] = ("已追加。同一事实只写一次；块快满时用 memory_rethink 合并同类项，"
+                          "别把重复内容硬塞进去。")
     return result
 
 
@@ -675,6 +904,8 @@ TOOLS: tuple[Tool, ...] = (
          effect="读取变化事件流"),
     Tool("get_live_connections", "detail", GetLiveConnectionsArgs, _tool_live_connections,
          effect="读取连接明细（含对端）"),
+    Tool("get_process_identity", "aggregate", GetProcessIdentityArgs, _tool_process_identity,
+         effect="读取进程身份（厂商/产品/版本）"),
     Tool("memory_insert", "memory", MemoryInsertArgs, _tool_memory_insert,
          effect="追加长期记忆"),
     Tool("memory_replace", "memory", MemoryReplaceArgs, _tool_memory_replace,
@@ -925,6 +1156,31 @@ SYSTEM_PROMPT = """你是 flowwatch 的流量分析助手。flowwatch 运行在�
 
 工作方式：
 - 答案必须来自工具返回的真实数据，**不要编造**数字；查不到就说查不到。
+- **点名就先检索**：用户提到具体进程或域名（如 doubao）时，用 get_top_processes /
+  get_top_domains 的 match 参数在全量数据里查，不要只在排行榜前 N 条里"扫一眼" ——
+  同一个应用常跑十几个进程、还会分散在多个域名上，扫榜必漏。
+  match 返回 matched=false 时只能说"这段时间没有它的流量记录"，**不能说"这个进程不存在"**
+  （进程在跑但没有网络活动是两回事）。
+- **不许描述没做过的动作**：工具调用过程用户能看到。别写"我用不区分大小写匹配查过"这类
+  你没真的执行过的步骤，也不要把上文的背景数字当作查证结果。
+- **记忆是背景，不是问题的范围**：用户问全局（"谁占带宽最多""一共多少流量"）时，必须查
+  **不带 match** 的完整排行；记忆里记着的对象只是额外关注点，别把答案悄悄缩成"这两个对象的情况"。
+- **每轮独立选工具；重复提问是红灯**：会话历史里出现过的查询方式只是记录，不是模板。
+  如果用户把同一个问题又问了一遍，说明上次的回答他没接受 —— 必须重新核实，并换用更贴合
+  问题的工具（问全局排行就用不带 match 的完整排行），不要复读上次的做法与结论。
+- **内部过程留在内部**：不要写"我差点没调工具/违反了准则/现按规则重答"，也不要提"此前的回答
+  有误 / 已确认编造"这类自我检讨 —— 用户看不到草稿，只看得到你这一条结论。答不了就直接说
+  答不了和原因（例如历史层没有这个维度）。
+- **match 只按名字过滤**。问"某个进程连了哪些域名"历史层答不了（进程与域名的关联没落库，
+  只有 detail 档的实时窗口 get_live_connections 能看到）—— 要如实说查不到，别拿域名名过滤冒充。
+- 某 pid 的"消失"事件只代表那一个进程实例结束了，**不等于整个应用没流量**；
+  说一个对象有/没有流量，必须来自一次明确的排行查询。
+- **别靠进程名猜软件**：要判断某个进程"是哪个软件/哪个厂商装的"，用 `get_process_identity`
+  （给 pid，或直接给名字片段让它自己找 pid）。它读的是 exe 版本资源（厂商/产品/描述/版本），
+  比按文件名猜可靠；进程已退出或跑在更高权限下时它会给不出路径，如实说"取不到"即可。
+- 说进程"是干什么的"前先调 get_process_identity，别按名猜（曾把 GameViewerServer 猜成"腾讯游戏助手"）。
+- 判断类结论必须贴定量证据（连接数、单连接平均字节、出/入比），别只给"能/不能判断"。
+- 数据被 limit 截断时必须说明"这是最近 N 条样本，非全量"。
 - 用户问"为什么/怎么回事"时，先查排行、历史、事件，再下结论。
 - 字节用 MiB/GiB，速率用 KiB/s、MiB/s；时间用本地时间。
 - 归因口径要说清：pid > 0 才是具体进程；"未归因"= 说不清是谁的，"属主受限"= 非提权
@@ -938,6 +1194,9 @@ SYSTEM_PROMPT = """你是 flowwatch 的流量分析助手。flowwatch 运行在�
   human（使用者偏好）/ watchlist（要盯住的对象）/ findings（已核实结论）。
 - 值得长期留的才写：用户偏好、要持续盯的进程/域名、核实过的结论（写上日期）。
   一次性的查询结果不要写进记忆。
+- **写之前先看本轮已注入的块内容**：同一事实只写一次，已在块里的直接跳过（重复写入会被拒）；
+  写"对象 + 为什么要盯 + 日期"，不要写同义改写，也别给自己的描述加戏。
+- 纯记忆类请求（"记一下""忘掉"）就回执这件事本身，**不要顺带给出没查过的流量数字**。
 - 小改用 memory_replace，追加用 memory_insert，整块整理用 memory_rethink；
   块快满时先合并同类项再写，不要硬塞。
 - 摘要可能失真时，用 conversation_search 回到对话原文核对。
@@ -964,6 +1223,27 @@ def _context_block(scope: str, blocks_rendered: str) -> str:
     return "\n".join(bits)
 
 
+def _strip_repeated_answers(history: list[dict[str, str]], question: str) -> list[dict[str, str]]:
+    """重复提问时，把历史里"同一句提问 + 紧随其后的回答"整对丢掉。
+
+    实测背景（2026-09-20）：同一句"现在谁在占带宽"问第 4 遍，历史里那 3 对问答成了
+    few-shot 模板，"每轮独立选工具"的提示词与新加的 system 提醒都拦不住复读 ——
+    把模板本身移出上下文才有效。当前这一轮的提问由调用方在末尾补回。
+    """
+    kept: list[dict[str, str]] = []
+    skip_answer = False
+    for item in history:
+        if skip_answer and item.get("role") == "assistant":
+            skip_answer = False
+            continue
+        skip_answer = False
+        if item.get("role") == "user" and item.get("content") == question:
+            skip_answer = True          # 这一对不要了：回答紧跟在后面
+            continue
+        kept.append(item)
+    return kept
+
+
 def run_turn(question: str, session_id: str) -> Iterator[tuple[str, dict[str, Any]]]:
     """跑一轮对话，产出 (event, payload)，由路由层封装成 SSE。"""
     config = load_config()
@@ -971,6 +1251,7 @@ def run_turn(question: str, session_id: str) -> Iterator[tuple[str, dict[str, An
     tool_trace: list[dict[str, Any]] = []
     used_tools: list[str] = []
     _Source.session_id = session_id
+    _Source.scope = scope          # 工具的字段级隐私分级（如完整路径只在 detail 档出）
 
     yield "meta", {
         "schema": SCHEMA,
@@ -999,12 +1280,27 @@ def run_turn(question: str, session_id: str) -> Iterator[tuple[str, dict[str, An
         messages.append({"role": "system",
                          "content": f"更早对话的摘要（可用 conversation_search 回溯原文）：{summary}"})
     messages.append({"role": "system", "content": _context_block(scope, MEMORY.render_blocks())})
-    messages += MEMORY.history(session_id)
+    # 重复提问 = 上次没答好。只要光提醒不够：实测同一句问 4 遍，模型会把自己上一轮的
+    # 问答当成 few-shot 模板照抄（连加了 system 提醒都照抄）。要断复读，就得把那个模板
+    # 从上下文里**拿掉**，再把"这是重复提问"讲清楚。
+    asked_before = MEMORY.times_asked(session_id, question)
+    history = MEMORY.history(session_id)
+    if asked_before > 1:
+        history = _strip_repeated_answers(history, question)
+    messages += history
     if not any(item["role"] == "user" and item["content"] == question for item in messages):
         messages.append({"role": "user", "content": question})
+    if asked_before > 1:
+        messages.append({
+            "role": "system",
+            "content": f"注意：用户此前已问过同样的问题（含本轮共 {asked_before} 次），"
+                       "说明上次的回答没有被接受，相关的旧回答已从上下文里移除。请重新核实，"
+                       "并换用更贴合问题的工具（问全局排行就用**不带 match** 的完整排行）。",
+        })
 
     tools = tools_for(scope)
     answer = ""
+    forced_grounding = False        # 是否因"首轮零工具调用"强制纠正过一轮
 
     try:
         if config.name == "mock":
@@ -1020,7 +1316,16 @@ def run_turn(question: str, session_id: str) -> Iterator[tuple[str, dict[str, An
                 message = chat_completion(config, messages, tools)
                 calls = message["tool_calls"]
                 if not calls:
-                    answer = message["content"] or ""
+                    draft = (message["content"] or "").strip()
+                    # 首轮零工具调用，而问题要的是本机数据 → 不采信这份草稿，纠正一轮再来。
+                    # 把草稿一起带回去，模型才知道"刚才那份不算数"。
+                    # 刻意**不把草稿放回上下文**：放回去它就会在终稿里写"此前回答系编造、
+                    # 已确认错误"这类自我检讨 —— 而用户从没见过那份草稿（实测踩过）。
+                    if turn == 0 and not forced_grounding and tools and needs_evidence(question):
+                        forced_grounding = True
+                        messages.append({"role": "user", "content": GROUNDING_NUDGE})
+                        continue
+                    answer = draft
                     break
                 messages.append({
                     "role": "assistant",
@@ -1050,6 +1355,12 @@ def run_turn(question: str, session_id: str) -> Iterator[tuple[str, dict[str, An
         yield "error", {"message": f"{type(exc).__name__}: {exc}"}
         return
 
+    # 数据类问题却一个取数工具都没跑过（含"只调了记忆工具"这种假证据）→ 显式标注未核实。
+    # 记忆工具只写/读记忆，读不出任何本机数据，不能算证据。
+    evidence_tools = [name for name in used_tools if name.startswith(DATA_TOOL_PREFIX)]
+    if needs_evidence(question) and not evidence_tools:
+        answer = UNVERIFIED_NOTE + answer
+
     MEMORY.append(session_id, "assistant", answer, scope=scope, tools=tuple(used_tools))
     compacted = MEMORY.compact(session_id)
     state = MEMORY.state()
@@ -1058,6 +1369,9 @@ def run_turn(question: str, session_id: str) -> Iterator[tuple[str, dict[str, An
         "text": answer,
         "scope": scope,
         "tools": used_tools,
+        "evidence_tools": evidence_tools,   # 只算取数工具
+        "grounded": bool(evidence_tools),   # 本轮结论有没有数据证据
+        "retried": forced_grounding,        # 是否触发过"零工具调用"纠正
         "compacted": compacted,
         "memory": {"sessions": state["sessions"], "messages": state["messages"],
                    "compacted": state["compacted"],

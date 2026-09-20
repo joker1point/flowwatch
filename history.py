@@ -505,25 +505,41 @@ class HistoryStore:
             "series": series,
         }
 
-    def top_processes(self, minutes: int = 60, limit: int = 10) -> list[dict[str, Any]]:
+    def top_processes(self, minutes: int = 60, limit: int = 10,
+                      match: str | None = None, group: bool = False) -> list[dict[str, Any]]:
+        """区间内按累计字节排行的进程（只统计 pid > 0）。
+
+        三种用法，各自解决一类问题：
+        - 默认：**按 pid** 排行 —— UI 的进程榜用它做"点进去看曲线"的入口，pid 就是钻取键；
+        - `match='doubao'`：按名字片段在**全量数据**里检索，命中结果**按进程名合并**
+          （SQLite 的 LIKE 对 ASCII 默认不区分大小写，所以小写 doubao 能命中 Doubao.exe）。
+          点名叫一个应用时这是唯一正确查法 —— 去排行榜前 N 条里"扫一眼"会漏。
+        - `group=True`：排行本身也按进程名合并。Electron 类应用常跑十几个同名进程，
+          按 pid 会被拆成十几行，单个 pid 甚至挤不进榜单。
+        """
         if self._conn is None:
             return []
         since = self._since(minutes)
-        rows = self._execute(
-            """SELECT b.pid,
+        needle = (match or "").strip()[:60]
+        clause = ""
+        params: list[Any] = [since]
+        if needle:
+            clause = " AND EXISTS (SELECT 1 FROM buckets y WHERE y.pid = b.pid AND y.process LIKE ?)"
+            params.append(f"%{needle}%")
+        merge = bool(needle) or group
+        tail = "" if merge else "\n               LIMIT ?"
+        sql = f"""SELECT b.pid,
                       (SELECT process FROM buckets x WHERE x.pid = b.pid
                         ORDER BY x.bucket_ts DESC LIMIT 1) AS process,
                       SUM(b.out_bytes + b.in_bytes) AS total,
                       SUM(b.out_bytes), SUM(b.in_bytes),
                       MIN(b.bucket_ts), MAX(b.bucket_ts)
                FROM buckets b
-               WHERE b.bucket_ts >= ? AND b.pid > 0
+               WHERE b.bucket_ts >= ? AND b.pid > 0{clause}
                GROUP BY b.pid
-               ORDER BY total DESC
-               LIMIT ?""",
-            (since, limit),
-        ).fetchall()
-        return [
+               ORDER BY total DESC{tail}"""
+        rows = self._execute(sql, tuple(params if merge else params + [limit])).fetchall()
+        items = [
             {
                 "pid": pid,
                 "process": name,
@@ -535,6 +551,30 @@ class HistoryStore:
             }
             for pid, name, total, out, in_b, first, last in rows
         ]
+        return self._merge_by_name(items, limit) if merge else items
+
+    @staticmethod
+    def _merge_by_name(items: list[dict[str, Any]], limit: int) -> list[dict[str, Any]]:
+        """把按 pid 的行合并成按**进程名**的行。
+
+        `pid` 保留流量最大的那个（仍是钻取入口），其余进 `pids`，并给出 `pid_count`。
+        入参必须已按流量降序；合并结果同样按总流量降序后截断。
+        """
+        merged: dict[str, dict[str, Any]] = {}
+        for item in items:
+            key = (item.get("process") or "?").casefold()
+            row = merged.get(key)
+            if row is None:
+                merged[key] = {**item, "pids": [item["pid"]], "pid_count": 1}
+                continue
+            row["total_bytes"] += item["total_bytes"]
+            row["out_bytes"] += item["out_bytes"]
+            row["in_bytes"] += item["in_bytes"]
+            row["pids"].append(item["pid"])
+            row["pid_count"] += 1
+            row["first_seen"] = min(row["first_seen"], item["first_seen"])
+            row["last_seen"] = max(row["last_seen"], item["last_seen"])
+        return sorted(merged.values(), key=lambda row: row["total_bytes"], reverse=True)[:limit]
 
     def timeline(self, minutes: int = 60, bucket_minutes: int = 5) -> dict[str, Any]:
         """整机时间序列：本机已归因 / 属主受限 / 未归因 / 别人的流量 分开给。"""
@@ -565,19 +605,29 @@ class HistoryStore:
         ]
         return {"bucket_seconds": span, "since": now_iso(since), "series": series}
 
-    def top_domains(self, minutes: int = 60, limit: int = 20, named_only: bool = False) -> list[dict[str, Any]]:
-        """区间内的域名排行。`named_only=True` 时排除未识别（kind='ip'）的条目。"""
+    def top_domains(self, minutes: int = 60, limit: int = 20, named_only: bool = False,
+                    match: str | None = None) -> list[dict[str, Any]]:
+        """区间内的域名排行。`named_only=True` 时排除未识别（kind='ip'）的条目。
+
+        `match` 按名字片段检索（同 top_processes：ASCII 不区分大小写，小写 doubao 能命中
+        logifier.doubao.com）。过滤发生在 LIMIT 之前，所以点名声明的域名不会被排行榜截掉。
+        """
         if self._conn is None:
             return []
         since = self._since(minutes)
         clause = "AND kind <> 'ip'" if named_only else ""
+        params: list[Any] = [since]
+        needle = (match or "").strip()[:60]
+        if needle:
+            clause += " AND name LIKE ?"
+            params.append(f"%{needle}%")
         rows = self._execute(
             f"""SELECT name, kind, SUM(out_bytes), SUM(in_bytes), SUM(conns)
                 FROM domains WHERE bucket_ts >= ? {clause}
                 GROUP BY name, kind
                 ORDER BY SUM(out_bytes + in_bytes) DESC
                 LIMIT ?""",
-            (since, limit),
+            tuple(params + [limit]),
         ).fetchall()
         return [
             {
@@ -591,18 +641,35 @@ class HistoryStore:
             for name, kind, out, in_b, conns in rows
         ]
 
-    def events(self, limit: int = 50, pid: int | None = None) -> list[dict[str, Any]]:
+    def events(self, limit: int = 50, pid: int | None = None,
+               match: str | None = None, minutes: int | None = None) -> list[dict[str, Any]]:
+        """变化事件流（出现 / 消失 / 尖峰），由落库观测值派生。
+
+        - `pid`：精确定位一个进程实例（pid 每分钟都可能变，问"某个应用"时别用它）；
+        - `match`：按**进程名**过滤（不区分大小写子串）—— 这才是"doubao 最近有没有异常"的正路；
+        - `minutes`：只看最近多少分钟。事件是稀疏数据，不给窗口时 LIMIT 20 很容易全是别人的事件，
+          于是"没查到"变成假结论。
+        """
         if self._conn is None:
             return []
-        if pid is None:
-            rows = self._execute(
-                "SELECT ts, kind, pid, process, detail FROM events ORDER BY ts DESC LIMIT ?", (limit,)
-            ).fetchall()
-        else:
-            rows = self._execute(
-                "SELECT ts, kind, pid, process, detail FROM events WHERE pid = ? ORDER BY ts DESC LIMIT ?",
-                (pid, limit),
-            ).fetchall()
+        clause = ""
+        params: list[Any] = []
+        if pid is not None:
+            clause += " AND pid = ?"
+            params.append(pid)
+        needle = (match or "").strip()[:60]
+        if needle:
+            clause += " AND process LIKE ?"
+            params.append(f"%{needle}%")
+        if minutes:
+            clause += " AND ts >= ?"
+            params.append(int(time.time()) - max(1, minutes) * 60)
+        params.append(limit)
+        rows = self._execute(
+            f"SELECT ts, kind, pid, process, detail FROM events WHERE 1=1{clause}"
+            " ORDER BY ts DESC LIMIT ?",
+            tuple(params),
+        ).fetchall()
         return [
             {"ts": now_iso(ts), "kind": kind, "pid": pid_, "process": name, "detail": detail}
             for ts, kind, pid_, name, detail in rows

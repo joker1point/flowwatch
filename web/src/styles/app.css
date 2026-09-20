@@ -728,7 +728,14 @@ body {
   background: var(--bg-raised);
 }
 
-.msg__text { margin: 0; white-space: pre-wrap; }
+.msg__text { margin: 0; }
+/* 助手回答按行拆成元素后，行尾空格与空行要靠它们自己撑住（空行 = 段落间距） */
+.msg__line { margin: 0; white-space: pre-wrap; }
+.msg__line:empty { height: 0.75em; }
+.msg__line--bullet { padding-left: 1.05em; text-indent: -1.05em; }
+.msg__line--heading { margin-top: 0.45em; font-weight: 600; }
+.msg__line--heading:first-child { margin-top: 0; }
+.msg__text code { padding: 0 3px; border-radius: 3px; background: var(--accent-soft); }
 .msg__meta { margin: var(--s-1) 0 0; color: var(--text-muted); font-size: 10px; }
 .msg--tool { color: var(--text-secondary); font-size: 10px; }
 

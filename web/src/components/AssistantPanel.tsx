@@ -38,6 +38,51 @@ const SUGGESTIONS = [
   '近 24 小时有哪些变化事件',
 ]
 
+/** 行内标记：**加粗** 与 `代码`。 */
+function renderInline(text: string) {
+  return text
+    .split(/(\*\*[^*]+\*\*|`[^`]+`)/g)
+    .filter((part) => part !== '')
+    .map((part, index) => {
+      if (part.startsWith('**') && part.endsWith('**') && part.length > 4) {
+        return <strong key={index}>{part.slice(2, -2)}</strong>
+      }
+      if (part.startsWith('`') && part.endsWith('`') && part.length > 2) {
+        return <code key={index}>{part.slice(1, -1)}</code>
+      }
+      return <span key={index}>{part}</span>
+    })
+}
+
+/** 极简 markdown：**加粗** / `代码` / 标题 / 列表 / 换行。
+ *
+ * 模型爱用这几样（实测最常见的三种：`**重点**`、`- 条目`、`### 小标题`），原样显示则满屏
+ * 星号与井号，面板很难看。不引 markdown 库 —— 这点语法足够，多一个依赖不值得。
+ */
+function RichText({ text }: { text: string }) {
+  return (
+    <div className="msg__text">
+      {text.split('\n').map((line, index) => {
+        const heading = /^\s*#{1,6}\s+(.*)$/.exec(line)
+        if (heading) {
+          return (
+            <p key={index} className="msg__line msg__line--heading">
+              {renderInline(heading[1])}
+            </p>
+          )
+        }
+        const bullet = /^\s*[-*]\s+/.test(line)
+        const ordered = /^\s*\d+[.)]\s+/.test(line)
+        return (
+          <p key={index} className={bullet || ordered ? 'msg__line msg__line--bullet' : 'msg__line'}>
+            {renderInline(bullet ? line.replace(/^\s*[-*]\s+/, '') : line)}
+          </p>
+        )
+      })}
+    </div>
+  )
+}
+
 function Row({ item }: { item: Item }) {
   if (item.kind === 'user') {
     return <p className="msg msg--user">{item.text}</p>
@@ -54,7 +99,7 @@ function Row({ item }: { item: Item }) {
   }
   return (
     <div className="msg msg--assistant">
-      <p className="msg__text">{item.text}</p>
+      <RichText text={item.text} />
       <p className="msg__meta mono">
         {item.scope === 'detail' ? '明细档' : '聚合档'}
         {item.tools.length > 0 ? ` · 工具 ${item.tools.length} 次` : ''}

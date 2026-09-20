@@ -512,6 +512,27 @@ GET /api/history/domains?minutes=60&limit=20&named_only=true
 界面右列有个「流量助手」面板：随时问本机流量的问题（谁在占带宽、某个进程为什么异常、
 某个域名连了多少），回答**只基于 flowwatch 自己采到的数据**，查不到就说查不到。
 
+![流量助手](docs/screenshot-03-assistant-idle.png)
+
+> 空闲态给三个建议问题；每一轮都显示**工具调用过程**与数据档位（聚合档 / 明细档）。
+> 下面四张是同一台机器的**真实问答**（真模型 + 真数据，没有摆拍、没有样例数据）：
+
+**「现在谁在占带宽？」** —— 全局排行（不带 `match`），给占比、出/入与域名侧印证：
+
+![排行](docs/screenshot-04-assistant-ranking.png)
+
+**「doubao 收发的是心跳包吗？」** —— 点名检索 → 连接数 / 单连接平均字节 / 收发比，再下结论：
+
+![心跳](docs/screenshot-05-assistant-heartbeat.png)
+
+**「GameViewerServer.exe 是哪个软件？」** —— 读 exe 版本资源答「厂商 / 产品 / 版本」，不按名字猜：
+
+![身份](docs/screenshot-06-assistant-identity.png)
+
+**「doubao 最近一小时有异常吗？」** —— 事件流按**进程名 + 时间窗**过滤（pid 会变，名字才稳）：
+
+![事件](docs/screenshot-07-assistant-events.png)
+
 ### 结构不是自己拍的：三份成熟实现的设计被直接对齐
 
 只借鉴设计、不引入框架 —— 本项目依赖只有 psutil / fastapi / uvicorn（抓包都是 ctypes 直调

@@ -91,5 +91,87 @@ stats = store2.stats()
 check("stats 里有 domain_rows", stats["domain_rows"] >= 3, True)
 store2.close()
 
+# ---------------------------------------------------------------- 进程排行：点名检索 + 按名合并
+# 09-20 线上事故：用户点名"doubao"，助手跑的是"在排行榜前 10 条里找小写 doubao"，
+# 结果报"查不到该进程"，而 Doubao.exe 当时其实是第 4 名（且一个应用跑了十几个同名进程）。
+# 这一段钉死按名检索这条路：不区分大小写、跨 pid 合并、不受条数截断、查不到返回空。
+DB2 = REPO / "_run" / "repro_processes.db"
+for suffix in ("", "-wal", "-shm"):
+    target = Path(str(DB2) + suffix)
+    if target.exists():
+        target.unlink()
+
+NAMES = {50164: "Doubao.exe", 50304: "Doubao.exe", 84812: "Steam++.Accelerator.exe"}
+pstore = history.HistoryStore(DB2, flush_interval=0.0)
+pstore.set_name_resolver(lambda pid: NAMES.get(pid, f"proc{pid}"))
+pstore.open()
+pstore.append(window([], by_pid={
+    50164: {"out_bytes": 300, "in_bytes": 100, "packets": 5, "conns": []},
+    50304: {"out_bytes": 20, "in_bytes": 10, "packets": 2, "conns": []},
+    84812: {"out_bytes": 9000, "in_bytes": 1000, "packets": 90, "conns": []},
+}))
+pstore.close()
+
+pstore2 = history.HistoryStore(DB2)
+pstore2.open()
+per_pid = pstore2.top_processes(minutes=60, limit=10)
+check("默认仍是按 pid 排行（前端靠 pid 钻取曲线）", [row["pid"] for row in per_pid],
+      [84812, 50164, 50304])
+hit = pstore2.top_processes(minutes=60, limit=10, match="doubao")          # 全小写
+check("按名检索不区分大小写", [row["process"] for row in hit], ["Doubao.exe"])
+check("同名的多个 pid 合并成一行", hit[0]["pid_count"], 2)
+check("合并后字节数是各 pid 之和", hit[0]["total_bytes"], 300 + 100 + 20 + 10)
+check("pid 保留流量最大的那个（钻取键）", hit[0]["pid"], 50164)
+check("被合并的 pid 全部列出", sorted(hit[0]["pids"]), [50164, 50304])
+check("按名检索不受 limit 截断（不匹配的 Steam++ 更大也不占位）",
+      [row["process"] for row in pstore2.top_processes(minutes=60, limit=1, match="doubao")],
+      ["Doubao.exe"])
+check("查不到返回空列表（让助手说'没有流量'，而不是'进程不存在'）",
+      pstore2.top_processes(minutes=60, limit=10, match="no-such-app"), [])
+check("group=True 的排行榜本身就按进程名合并",
+      [row["process"] for row in pstore2.top_processes(minutes=60, limit=10, group=True)],
+      ["Steam++.Accelerator.exe", "Doubao.exe"])
+pstore2.close()
+
+dstore = history.HistoryStore(DB)
+dstore.open()
+check("域名检索同样不区分大小写",
+      [row["name"] for row in dstore.top_domains(minutes=60, limit=10, match="A.EXAMPLE")],
+      ["a.example.com"])
+check("域名检索查不到也是空列表",
+      dstore.top_domains(minutes=60, limit=10, match="zzz.example"), [])
+dstore.close()
+
+# ---------------------------------------------------------------- 事件流：按进程名 / 时间窗过滤
+# 事件是派生数据（出现/消失/尖峰），这里只测查询侧 —— 直接写事件行，比造真实窗口稳。
+raw2 = sqlite3.connect(DB2)
+now = int(time.time())
+raw2.executemany(
+    "INSERT INTO events(ts, kind, pid, process, detail) VALUES(?,?,?,?,?)",
+    [
+        (now - 300, "vanish", 50164, "Doubao.exe", "连续 3 分钟无流量"),
+        (now - 120, "appear", 50304, "DoubaoWork.exe", "新出现"),
+        (now - 3 * 3600, "spike", 84812, "Steam++.Accelerator.exe", "尖峰"),
+    ],
+)
+raw2.commit()
+raw2.close()
+
+estore = history.HistoryStore(DB2)
+estore.open()
+check("事件按进程名过滤（不区分大小写，新→旧）",
+      [row["process"] for row in estore.events(match="doubao")], ["DoubaoWork.exe", "Doubao.exe"])
+check("事件过滤 + 时间窗：3 小时前的那条被排除",
+      [row["process"] for row in estore.events(match="doubao", minutes=60)],
+      ["DoubaoWork.exe", "Doubao.exe"])
+check("只有窗口没有名字时也过滤",
+      [row["process"] for row in estore.events(minutes=60, limit=10)],
+      ["DoubaoWork.exe", "Doubao.exe"])
+check("pid + 窗口精确到实例",
+      [row["kind"] for row in estore.events(pid=50164, minutes=10)], ["vanish"])
+check("查不到就是空列表（助手据此说'没有该事件'，而不是'没有流量'）",
+      estore.events(match="no-such-app", minutes=60), [])
+estore.close()
+
 print(f"\n{'全部通过' if not FAILURES else '失败项: ' + ', '.join(FAILURES)}")
 raise SystemExit(1 if FAILURES else 0)

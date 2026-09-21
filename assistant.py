@@ -12,6 +12,7 @@
      让模型对"预算快满了"有感知，从而主动整理而不是盲目追加。
    - 变更原语沿用三种粒度：`memory_replace`（精确小改）/ `memory_insert`（追加）/
      `memory_rethink`（整块重写）。一个"写记忆"通吃会让模型分不清意图。
+
    - **对抗 Summary Drift**：消息压缩只做标记、不删原文，并留 `conversation_search`
      让模型能回到证据核对 —— 这是 Letta 把「策展记忆」与「会话证据」分开的原因。
 
@@ -62,17 +63,19 @@ from fastapi import APIRouter, HTTPException
 from fastapi.responses import StreamingResponse
 from pydantic import BaseModel, Field, ValidationError
 
+import datadir
+
 SCHEMA = "flowwatch-assistant/v1"
-MEMORY_PATH = Path(__file__).with_name("assistant_memory.db")
+# 运行期数据落盘位置：源码运行 = 项目目录；打包成 exe = exe 所在目录（见 datadir.py）
+MEMORY_PATH = datadir.data_path("assistant_memory.db")
 # UI「模型设置」的落盘位置（含 API key，必须在 .gitignore 内）；
 # 文件不存在时 load_config 静默回退环境变量 / 项目 .env。
-CONFIG_PATH = Path(__file__).with_name("assistant_config.json")
+CONFIG_PATH = datadir.data_path("assistant_config.json")
 
 MAX_TURNS = 6                # 一轮提问最多几次模型往返（含工具轮）
 RECENT_MESSAGES = 10         # 注入上下文的最近消息条数
 COMPACT_THRESHOLD = 28       # 超过这么多条就把更早的标记为已压缩（**不删除**）
 HTTP_TIMEOUT = 90.0
-
 # 首轮"零工具调用"兜底。背景（2026-09-20 实测事故）：用户问"doubao 收发的是心跳包吗"，
 # 模型一次工具都没调，直接编出"我查了实时帧 / 排行榜 / 事件流，都没有"整段结论，
 # 而服务端当时无条件采信了它（while 循环里 `if not calls: answer = content; break`）。
@@ -998,7 +1001,7 @@ def _load_env_file_once() -> None:
     if _ENV_FILE_LOADED:
         return
     _ENV_FILE_LOADED = True
-    path = Path(__file__).with_name(".env")
+    path = datadir.data_path(".env")
     if not path.exists():
         return
     for line in path.read_text(encoding="utf-8", errors="ignore").splitlines():

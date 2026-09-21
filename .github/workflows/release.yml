@@ -1,0 +1,195 @@
+name: release
+
+# 两个产物，都来自同一次 tag：
+#   1. flowwatch-<tag>-windows.zip        源码 + **预构建前端**（不需要 Node；双击 start.cmd）
+#   2. flowwatch-<tag>-win64-exe.zip      免 Python 的 exe（onedir；双击 flowwatch.exe）
+#
+# 三条纪律（都是本项目既有约定的延续）：
+#   · 测试红不发版 —— tag push 不会触发 ci.yml（它只盯 main），所以这里自带一道测试；
+#   · 前端在 CI 里用 VITE_API_BASE=/ 构建（同源单端口），用户端零 Node；
+#   · exe 必须在**干净环境**里构建 —— runner 只装 requirements + pyinstaller；
+#     本机实测：conda 基环境构建 207 MB vs 干净 venv 33 MB（多出的是没人 import 的包）。
+
+on:
+  push:
+    tags: ["v*"]
+  workflow_dispatch:
+    inputs:
+      tag:
+        description: "要发布/更新的 tag（例如 v1.0.1）；留空则只产 artifact、不碰 Release"
+        required: false
+        default: ""
+
+permissions:
+  contents: write
+
+env:
+  PYTHONIOENCODING: utf-8       # 测试脚本用中文打印用例名（Windows runner 默认不是 UTF-8）
+
+jobs:
+  # 发布前置：五个测试文件全绿才继续。它们零依赖、几秒钟跑完。
+  tests:
+    name: 测试 · 发布前把关
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.13"
+      - name: 安装依赖
+        run: pip install -r requirements.txt
+      - name: 解析层 · test_names
+        run: python tests/test_names.py
+      - name: 历史层 · test_domain_history
+        run: python tests/test_domain_history.py
+      - name: ETW 解析层 · test_etw
+        run: python tests/test_etw.py
+      - name: ETW 批量解析层 · test_etw_batch
+        run: python tests/test_etw_batch.py
+      - name: 流量助手 · test_assistant
+        run: python tests/test_assistant.py
+
+  # 产物 1：源码 + 预构建前端（Linux 上组装即可，zip 与平台无关）
+  package:
+    name: 打包 · 源码 + 预构建前端
+    needs: tests
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "20"
+          cache: npm
+          cache-dependency-path: web/package-lock.json
+      - name: 安装前端依赖
+        working-directory: web
+        run: npm ci
+      - name: 构建前端（同源：VITE_API_BASE=/）
+        working-directory: web
+        env:
+          VITE_API_BASE: "/"
+        run: npm run build
+      - name: 组装一键包（源码 + web/dist）
+        run: |
+          set -euo pipefail
+          VERSION="${{ inputs.tag || github.ref_name }}"
+          PKG="flowwatch-${VERSION}-windows"
+          mkdir -p "staging/${PKG}"
+          git archive HEAD | tar -x -C "staging/${PKG}"
+          rm -rf "staging/${PKG}/web/dist"
+          mkdir -p "staging/${PKG}/web/dist"
+          cp -r web/dist/. "staging/${PKG}/web/dist/"
+          ( cd staging && zip -qr "${PKG}.zip" "${PKG}" )
+          sha256sum "staging/${PKG}.zip" > "staging/${PKG}.zip.sha256"
+          ls -lh "staging/${PKG}.zip"
+      - name: 上传 artifact（手动跑也能拿到包）
+        uses: actions/upload-artifact@v4
+        with:
+          name: flowwatch-windows-package
+          path: |
+            staging/*.zip
+            staging/*.sha256
+          retention-days: 30
+      - name: 发布 / 更新 Release（写清两个产物怎么用）
+        if: github.event_name == 'push' || inputs.tag != ''
+        uses: softprops/action-gh-release@v2
+        with:
+          tag_name: ${{ inputs.tag || github.ref_name }}
+          files: |
+            staging/*.zip
+            staging/*.sha256
+          append_body: true
+          body: |
+            ## 开箱即用（Windows）—— 两个包，按需选一个
+
+            | 包 | 适合谁 | 怎么用 |
+            |---|---|---|
+            | `flowwatch-${{ inputs.tag || github.ref_name }}-windows.zip` | 已装 Python 3.10+ | 解压 → 双击 `start.cmd`（首次自动 `pip install`） |
+            | `flowwatch-${{ inputs.tag || github.ref_name }}-win64-exe.zip` | **没装 Python / 想零配置** | 解压 → 双击 `flowwatch.exe` |
+
+            两个包都一样：界面与 API **同源**在 http://127.0.0.1:8791/（不需要 Node、不需要开两个终端）。
+
+            - **Npcap 是驱动级依赖，两个包都"不进包"**，必须单独安装：https://npcap.com/#download
+              未装时界面能开、但没有数据（启动时会直接提示）。
+            - 助手默认 **mock** 档（不联网、仍真跑工具与记忆链路）；点面板右上「模型设置」可换成
+              任意 OpenAI 兼容 API 或本地 Ollama，保存即生效。
+            - exe 包的运行期数据（`history.db` / `assistant_memory.db` / `notes/`）就写在 exe 旁边；
+              源码包的写在项目目录里（`FLOWWATCH_DATA_DIR` 可改）。
+            - 想改前端源码 / HMR 开发：仍按 README 的 `python server.py` + `npm run dev` 两端口流程。
+
+  # 产物 2：免 Python 的 exe（必须 Windows 构建；干净环境 → 体积 ~33 MB）
+  package-exe:
+    name: 打包 · 免 Python exe（win64）
+    needs: [tests, package]
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.13"
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "20"
+          cache: npm
+          cache-dependency-path: web/package-lock.json
+      - name: 安装依赖（只装运行依赖 + PyInstaller：包体积靠这个)
+        run: |
+          python -m pip install --upgrade pip
+          pip install -r requirements.txt pyinstaller
+      - name: 安装前端依赖
+        working-directory: web
+        run: npm ci
+      - name: 构建前端（同源：VITE_API_BASE=/）
+        working-directory: web
+        env:
+          VITE_API_BASE: "/"
+        run: npm run build
+      - name: "PyInstaller 打包（spec = onedir + web/dist）"
+        run: python -m PyInstaller packaging/flowwatch.spec --noconfirm
+      - name: 组装 exe 包（附一份 ASCII 使用说明）
+        shell: pwsh
+        run: |
+          $version = "${{ inputs.tag || github.ref_name }}"
+          $stage = "staging/flowwatch-$version-win64"
+          New-Item -ItemType Directory -Force -Path $stage | Out-Null
+          Copy-Item -Recurse -Force "dist/flowwatch/*" $stage
+          $readme = @(
+            "flowwatch $version - one-click package (Windows x64, no Python needed)",
+            "",
+            "1) Double-click flowwatch.exe  ->  http://127.0.0.1:8791/",
+            "2) Npcap is REQUIRED for packet capture (driver-level, install once):",
+            "   https://npcap.com/#download    (without it the UI opens but shows no data)",
+            "3) The assistant defaults to mock mode (offline; still runs the tool/memory chain).",
+            "   Open Settings (top-right of the assistant panel) to use any OpenAI-compatible",
+            "   API or a local Ollama instead.",
+            "4) Runtime data (history.db / assistant_memory.db / notes/) is written next to this exe.",
+            "5) CLI flags: flowwatch.exe --port 9000 --no-browser --dev <device-fragment>"
+          )
+          Set-Content -Path (Join-Path $stage "README.txt") -Value $readme -Encoding ascii
+          $zip = "staging/flowwatch-$version-win64-exe.zip"
+          Compress-Archive -Path $stage -DestinationPath $zip -Force
+          $hash = (Get-FileHash $zip -Algorithm SHA256).Hash.ToLower()
+          "$hash  flowwatch-$version-win64-exe.zip" | Set-Content "$zip.sha256"
+          Get-Item $zip | Select-Object Name, Length
+      - name: 上传 artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: flowwatch-win64-exe
+          path: |
+            staging/*-win64-exe.zip
+            staging/*-win64-exe.zip.sha256
+          retention-days: 30
+      # 用 gh CLI 追加资产（不动 Release 正文 —— 正文由上面的 job 一次写好）
+      - name: 附到 Release
+        if: github.event_name == 'push' || inputs.tag != ''
+        shell: pwsh
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          $version = "${{ inputs.tag || github.ref_name }}"
+          gh release upload $version `
+            "staging/flowwatch-$version-win64-exe.zip" `
+            "staging/flowwatch-$version-win64-exe.zip.sha256" `
+            --clobber

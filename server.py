@@ -41,16 +41,18 @@ from pydantic import BaseModel
 import assistant
 import autostart
 import collector
+import datadir
 import history
 import localconn
 import notes
 
 logger = logging.getLogger("flowwatch.server")
 
-VERSION = "1.0.0"           # 对外版本（/api/meta 暴露；发版时与 git tag 一起改）
+VERSION = "1.0.1"           # 对外版本（/api/meta 暴露；发版时与 git tag 一起改）
 HOST = "127.0.0.1"
 PORT = 8788
-HISTORY_DB = Path(__file__).with_name("history.db")   # 与项目同目录，便于连同库一起备份
+# 与项目（或 exe）同目录，便于连同库一起备份；打包成 exe 时落在 exe 旁边（见 datadir.py）
+HISTORY_DB = datadir.data_path("history.db")
 FLUSH_INTERVAL = 1.0        # 速率窗口：每秒出一次速率
 TOP_N = 50                  # 单帧最多带多少个进程（前端只渲染可见范围）
 SSE_IDLE = 15.0             # 传输层心跳

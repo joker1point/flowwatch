@@ -5,7 +5,7 @@ Run 键一行写入、一行删除，用户级生效，是最轻的可逆做法�
 
 两条刻意的诚实：
   · 非 Windows 平台直接回 "不支持"，不假装成功；
-  · 写进去的命令 = 「当前解释器 + server.py + 当前启动参数」——
+  · 写进去的命令 = 「当前这条启动命令」（打包成 exe 时就是 exe 本身 + 当前参数）——
     即"把现在这条命令记下来"，而不是猜一个推荐命令（设备、端口、保留天数都以现状为准）。
 """
 
@@ -22,7 +22,11 @@ RUN_KEY = r"Software\Microsoft\Windows\CurrentVersion\Run"
 
 def current_command() -> str:
     """自启命令：复制"现在这条命令"，参数原样带走（含 --dev / --retention-days 等）。"""
-    parts = [f'"{sys.executable}"', f'"{Path(__file__).with_name("server.py")}"']
+    if getattr(sys, "frozen", False):
+        # 打包成 exe：解释器就是 exe 本身，参数原样带走（run.py 的单端口参数）
+        parts = [f'"{sys.executable}"']
+    else:
+        parts = [f'"{sys.executable}"', f'"{Path(__file__).with_name("server.py")}"']
     for arg in sys.argv[1:]:
         parts.append(f'"{arg}"' if " " in arg else arg)
     return " ".join(parts)

@@ -27,8 +27,10 @@ from fastapi import APIRouter, HTTPException
 from pydantic import BaseModel, Field
 
 import assistant
+import datadir
 
-NOTES_DIR = Path(__file__).with_name("notes")
+# 源码运行 = 项目目录；打包成 exe = exe 旁边（见 datadir.py）
+NOTES_DIR = datadir.data_path("notes")
 USER_NOTES = NOTES_DIR / "user_notes.md"
 PERSONAS = NOTES_DIR / "personas.json"
 AI_NOTES = NOTES_DIR / "ai_notes.json"

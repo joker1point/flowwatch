@@ -33,6 +33,7 @@ import ctypes as C
 import etw
 import etw_batch
 import logging
+import datadir
 import names
 import socket
 import struct
@@ -756,7 +757,7 @@ class Capturer:
         # （见 README《归因质量》里的测量：开 ETW 前后未归因率与属主受限字节的对比）。
         self.etw = etw.EtwConnTracker(self.conn_memory, lambda: self.local_ips)
         self.etw_batch = etw_batch.EtwBatchTracker(
-            self.conn_memory, lambda: self.local_ips, run_dir=Path(__file__).resolve().parent / "_run")
+            self.conn_memory, lambda: self.local_ips, run_dir=datadir.data_path("_run"))
         self.use_etw = False
         self.use_etw_udp = False     # UDP 事件（opt-in：≈1700 事件/秒的开销，值不值看实测）
         self.use_etw_batch = False

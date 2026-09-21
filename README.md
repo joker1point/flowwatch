@@ -1,7 +1,7 @@
 # flowwatch
 
 ![ci](https://github.com/joker1point/flowwatch/actions/workflows/ci.yml/badge.svg)
-![version](https://img.shields.io/badge/version-1.0.0-blue)
+![version](https://img.shields.io/badge/version-1.0.1-blue)
 ![license](https://img.shields.io/badge/license-MIT-green)
 
 > 回答一个任务管理器回答不了的问题：**这台机器上，哪个进程在跟谁通信、用了多少带宽、从什么时候开始的。**
@@ -40,10 +40,38 @@ python collector.py --list-devices     # 列出 Npcap 设备
 python collector.py --seconds 10       # 前台打印 Top-N 进程速率
 python collector.py --dev WLAN --top 12
 
-# ② 完整仪表盘：API → http://127.0.0.1:8788，前端 → http://127.0.0.1:5273
+# ② 完整仪表盘（开发：两端口）API → http://127.0.0.1:8788，前端 → http://127.0.0.1:5273
 python server.py
 cd web && npm install && npm run dev
+
+# ③ 只想看数据（单端口：界面 + API 同源）→ http://127.0.0.1:8791
+python run.py
 ```
+
+### 开箱即用（Windows 一键包）
+
+不想装 Node、也不想开两个终端 —— 用 [Releases](https://github.com/joker1point/flowwatch/releases/latest)
+里的一键包（源码 + **预构建好的前端**）：
+
+1. 下载 `flowwatch-*-windows.zip`，解压；
+2. 双击 `start.cmd`（首次运行会自动 `pip install` 依赖）；
+3. 浏览器自动打开 http://127.0.0.1:8791/ —— 界面与 API 同源单端口。
+
+两点如实说明：**Npcap 是驱动级依赖，必须单独安装**（https://npcap.com/#download，未装则界面能开、
+但没有数据）；助手默认 **mock** 档（不联网、仍真跑工具与记忆链路），点面板右上「模型设置」
+可换成任意 OpenAI 兼容 API 或本地 Ollama。上面 ③ 的 `run.py` 就是一键包里的启动器。
+
+需要**不装 Python 也能跑**的单文件形态（维护者向）：用 PyInstaller 打包即可 ——
+
+```bash
+python -m venv .venv-build && .venv-build/Scripts/pip install -r requirements.txt pyinstaller
+cd web && VITE_API_BASE=/ npm run build && cd ..
+.venv-build/Scripts/python -m PyInstaller packaging/flowwatch.spec --noconfirm
+# → dist/flowwatch/flowwatch.exe（onedir，双击运行；运行期数据落在 exe 旁边）
+```
+
+构建环境要干净：同一个 spec 在干净 venv 里 **33 MB**，在 conda 基环境里会**胖到 207 MB**
+（把 jieba / sphinx / babel 这类谁都没 import 的包也带进去）。Npcap 仍需单独安装。
 
 ![仪表盘](docs/screenshot-01-dashboard.png)
 

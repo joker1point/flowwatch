@@ -272,7 +272,7 @@ export default function App() {
                 )}%（本窗口 ${(frame.totals.unknown_ratio * 100).toFixed(1)}%）`
               : '正在连接采集层…',
             frame?.totals ? `属主受限 ${bytes(frame.totals.masked_bytes)}` : '',
-            frame?.totals ? `别人的流量 ${frame.totals.foreign_packets.toLocaleString()} 包` : '',
+            frame?.totals ? `同网段邻居流量 ${frame.totals.foreign_packets.toLocaleString()} 包` : '',
             frame?.totals ? `非 TCP/UDP ${frame.totals.skipped_packets.toLocaleString()} 包` : '',
             health
               ? `域名解析 DNS ${health.names.dns_records} / SNI ${health.names.sni_records}（覆盖 ${(

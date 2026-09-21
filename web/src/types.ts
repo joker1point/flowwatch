@@ -203,7 +203,7 @@ export interface ProcessHistory {
   series: HistorySample[]
 }
 
-/** 整机分层时间序列（`/api/history/timeline`）：本机流量按归属拆三层，别人的流量单独给。 */
+/** 整机分层时间序列（`/api/history/timeline`）：本机流量按归属拆三层，同网段邻居流量单独给。 */
 export interface TimelinePoint {
   ts: string
   own_out_bps: number

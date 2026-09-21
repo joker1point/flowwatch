@@ -331,7 +331,7 @@ export function HistoryView({ health }: Props) {
           <span className="legend legend--own">本机已归因</span>
           <span className="legend legend--masked">属主受限</span>
           <span className="legend legend--unattr">未归因</span>
-          <span className="legend legend--foreign">别人的流量（不计入本机）</span>
+          <span className="legend legend--foreign">同网段的邻居流量（不计入本机）</span>
         </div>
         {series.length > 0 && series.length < slots ? (
           <p className="panel__hint panel__hint--pad">

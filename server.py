@@ -309,7 +309,7 @@ def health() -> dict[str, Any]:
         "last_packet_ts": (datetime.fromtimestamp(capturer.last_packet_ts).isoformat(timespec="seconds")
                            if capturer.last_packet_ts else None),   # 采集静默时一眼可见
         "watchdog": capturer.watchdog_stats(),                        # 看门狗状态（重开次数 / 错误）
-        "foreign_packets": stats.get("foreign_packets", 0),   # 别人的流量：不计入本机统计
+        "foreign_packets": stats.get("foreign_packets", 0),   # 同网段的邻居流量：不计入本机统计
         "skipped_packets": stats.get("skipped_packets", 0),
         "masked_bytes": stats.get("masked_bytes", 0),         # 端点已知、属主受权限限制
         "sticky_hits": capturer.index.sticky_hits,            # 端点短时记忆救回次数

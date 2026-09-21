@@ -563,7 +563,8 @@ class FlowAggregator:
                 slot[3].add(_flags_text(flags))
 
     def add_foreign(self, length: int) -> None:
-        """两端都不是本机地址：属于**别人的流量**，既不算归因成功也不算归因失败。
+        """两端都不是本机地址：属于**同网段的邻居流量**（别人的设备，不是别人的账户），
+        既不算归因成功也不算归因失败。
 
         单列出来是为了让"未归因率"这个指标干净——它应该只衡量"本机流量里有多少
         说不清是谁的"，不该被广播域里的邻居帧稀释或污染。
@@ -1177,7 +1178,7 @@ def render_diag(window: dict[str, Any], agg: FlowAggregator) -> str:
     lines = [
         f"  本窗口已归因 {_fmt_bytes(attributed).strip()} / 未归因 {_fmt_bytes(window['unknown_bytes']).strip()}"
         f"（{window['unknown_packets']} 包）"
-        f" · 累计分类：别人的流量 {stats['foreign_packets']} 包 / 非 TCP-UDP {stats['skipped_packets']} 包"
+        f" · 累计分类：同网段邻居流量 {stats['foreign_packets']} 包 / 非 TCP-UDP {stats['skipped_packets']} 包"
     ]
     for flow in window["unknown_flows"][:6]:
         total = flow["out_bytes"] + flow["in_bytes"]
@@ -1243,7 +1244,7 @@ def main(argv: list[str] | None = None) -> int:
     print(f"\n汇总: 包 {stats['packets']} / 本机字节 {_fmt_bytes(stats['bytes']).strip()} / "
           f"解析错误 {stats['parse_errors']} / "
           f"未归因 {unknown.get('ratio', 0.0) * 100:.1f}%（{_fmt_bytes(unknown.get('bytes', 0)).strip()}）")
-    print(f"分类: 别人的流量 {stats['foreign_packets']} 包 / {_fmt_bytes(stats['foreign_bytes']).strip()}"
+    print(f"分类: 同网段邻居流量 {stats['foreign_packets']} 包 / {_fmt_bytes(stats['foreign_bytes']).strip()}"
           f" · 非 TCP-UDP 或头部不全 {stats['skipped_packets']} 包")
     print(f"归因兜底: 端点短时记忆命中 {capturer.index.sticky_hits} 次 / "
           f"四元组记忆命中 {capturer.conn_memory.hits} 次")

@@ -41,6 +41,7 @@
 `expect` 可用判据（全部确定性，来自 SSE 事件与模块状态，见 `run_eval.py` 的 `_assert_run`）：
 
 - 事件级：`scope` / `grounded` / `retried` / `tools_all_of` / `tools_none_of` / `model_calls` / `max|min_model_calls`
+- 协议 / 兜底：`tool_choice_required`（纠正轮那一跳必须向 provider 声明 `tool_choice="required"`）、`fallback_all_of`（系统侧补查代跑了哪些工具，来自 `done.fallback`）
 - 工具级：`tool_args`（参数值；`null` = 必须缺省）、`tool_result_contains`、`tool_result_field`、`tool_description_contains`
 - **发给模型的 offer 列表**：`offered_tools_all_of` / `offered_tools_none_of` —— 隐私隔离这类承诺只有在这层核对才算验过
 - 答案级：`answer_prefix` / `answer_prefix_not` / `answer_contains_all` / `answer_contains_any` / `answer_not_contains`
@@ -58,13 +59,6 @@ python ../_deploy/_qa/evals_mutation_check.py      # 在 frontend-works 下：py
 
 它注入两个已知缺陷 —— ①`needs_evidence` 恒 False（拆护栏）、②`tools_for` 无视档位（拆物理隔离）——
 **两个都被抓到才算通过**。2026-09-21 实测：变异 A 让 3 条 grounding 用例全红、变异 B 让 `scope-aggregate-02` 变红。
-
-## 产物
-
-- `REPORT.md` —— **要提交的那一份**：分类汇总 + 逐用例明细 + 失败明细 + 口径说明。
-  live 档的失败明细**只留判据名、不印实际值**（实际值可能是真模型答案，含真实域名）
-- `results/eval_<mode>_<时间戳>.json` —— 每条用例的判据明细，可对比两次运行的差异；**本地留存（已 gitignore）**
-- `fixtures/`（`--record` 时）—— live 档原始转写，**含真实进程名/域名，已 gitignore，不要提交**
 
 ## 首轮跑出来的两条真实观察（2026-09-21）
 
@@ -102,3 +96,29 @@ python ../_deploy/_qa/evals_mutation_check.py      # 在 frontend-works 下：py
 
 另外：live 档对**传输层瞬时错误**（实测遇到过 `RemoteDisconnected`，服务端日志全是 200）
 会自动重试一次 —— 抖动不该被记成"行为失败"；重试后仍失败才算红。
+
+## 系统侧补查（2026-09-22，第七轮）
+
+背景：`needs_evidence` 词表 + 纠正轮 + 未核实标注已经把"没查却像查过"堵住了，但用户的答案本身
+仍可能是废的（护栏只负责标注）。这一轮加的是**唯一不依赖模型合作的一层**：
+
+| 层 | 触发条件 | 谁在查 |
+|---|---|---|
+| 纠正轮 | 首轮零工具调用且问题要本机数据 | 模型自己（协议层加 `tool_choice="required"` 强制；provider 不认就退回 `auto`） |
+| **系统补查** | **整轮一个工具都没调用过**（`done.fallback` 为空即未触发） | 服务端：按问题类型跑确定性取数，结果注回上下文重答 |
+| 未核实标注 | 无成功证据且非豁免 | ——（红线不动） |
+
+- **触发条件刻意窄**：只有"整轮零工具"才补查。调过工具却没拿到数据（`args-invalid-01` 参数非法、
+  `grounding-memory-only-03` 只调记忆工具）**不走补查**，继续由未核实标注兜底 —— 否则那两条红线用例会被绕过。
+- **空结果不算证据**：`_fallback_evidence()` 要求补查结果**有内容**（空排行 = 没查到），所以
+  `grounding-unverified-02`（对象 zebraapp 在固定世界里不存在）照旧打标。
+- **钉子用例**：`grounding-fallback-01`（补查拿到数据 → 不打标）、`grounding-unverified-02`、
+  `guard-detail-without-evidence-01`（明细档补一步"排行定位 pid → 连线明细"）、
+  `guard-detail-fallback-empty-01`（明细档补查空手 → 照标）、`memory-recall-01` 第 2 轮
+  （记忆仍是背景；补查给的是现况数据）。
+- **live 档证不出来的那部分**：真模型（qwen-plus）在这几条用例上**每次都自己调了工具**，补查压根没触发
+  —— 所以另有一条端到端 QA：`python _deploy/_qa/qa_fallback_e2e.py`。它用一个"永远返回不含 tool_calls
+  的 stub provider"跑**真实服务进程 + 真实采集数据 + 真实 SSE**（临时数据目录 + 独立端口，
+  不碰用户库），断言：纠正轮确实声明了 `tool_choice=required`、补查工具行带 `origin=system`、
+  拿到数据时不打标、空结果时照打标。2026-09-22 实测：`tool_choice` 轨迹
+  `['auto','required','auto'] × 2 轮`，10/10 项通过。

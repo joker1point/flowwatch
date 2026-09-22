@@ -41,7 +41,8 @@ def _proc_row(pid: int, process: str, total: int) -> dict:
 
 class FakeStore:
     """假历史层。Doubao.exe 故意给两个 pid —— 模拟 Electron 那种"一个应用十几个进程"，
-    09-20 事故正是"小写 doubao 没命中 Doubao.exe"，这里用来钉死 match 的语义。"""
+    09-20 事故正是"小写 doubao 没命中 Doubao.exe"，这里用来钉死 match 的语义。
+    """
 
     def stats(self) -> dict:
         return {"retention_days": 30, "oldest": "2026-09-17T08:00:00", "buckets": 11, "events": 3}
@@ -368,27 +369,52 @@ try:
 
         tries = {"n": 0}
         lazy_prompts: list[str] = []
-        lazy_draft = "查不到 doubao 进程，我扫了排行榜和事件流都没有。"
+        lazy_choices: list[str | None] = []
+        lazy_draft = "查不到 zebraapp 进程，我扫了排行榜和事件流都没有。"
 
-        def lazy_chat(config, messages, tools):
+        def lazy_chat(config, messages, tools, tool_choice=None):
             tries["n"] += 1
             lazy_prompts.append("\n".join(str(item.get("content")) for item in messages))
+            lazy_choices.append(tool_choice)
             return {"content": lazy_draft, "tool_calls": []}
 
         assistant.chat_completion = lazy_chat
-        events = list(assistant.run_turn("doubao发送和接收的是心跳包吗", "lazy-session"))
+        events = list(assistant.run_turn("zebraapp.exe 收发的是心跳包吗", "lazy-session"))
         done = dict(events)["done"]
-        check("零工具调用会补一轮（共 2 次模型往返）", tries["n"], 2)
-        check("纠正后仍无证据 → 标注未核实", done["text"].startswith("⚠️"), True)
+        check("零工具：先纠正一轮 + 再系统补查一轮（共 3 次模型往返）", tries["n"], 3)
+        check("纠正轮走协议层强制（tool_choice=required）", "required" in lazy_choices, True)
+        check("补查代跑了点名检索", done["fallback"], ["get_top_processes"])
+        check("补查没查到内容（空排行不算证据）→ 仍标注未核实", done["text"].startswith("⚠️"), True)
         check("done 暴露证据标志", (done["grounded"], done["retried"]), (False, True))
         check("未核实的回答也照实写进记忆", "⚠️" in assistant.MEMORY.history("lazy-session", 5)[-1]["content"],
               True)
         check("作废的草稿不回灌上下文（否则终稿会自我检讨）",
               lazy_draft in lazy_prompts[1], False)
+        check("补查的工具行照常推给前端、并标明来源是系统",
+              [(item["name"], item.get("origin")) for name, item in events if name == "tool"],
+              [("get_top_processes", "system")])
+
+        # ② 懒模型 + 数据里**有**这个对象：补查拿到真数据 → 不再打"未核实"（答案不再从作废开始）
+        tries_b = {"n": 0}
+        prompts_b: list[str] = []
+
+        def lazy_then_data(config, messages, tools, tool_choice=None):
+            tries_b["n"] += 1
+            prompts_b.append("\n".join(str(item.get("content")) for item in messages))
+            return {"content": "Doubao.exe 近 60 分钟两个进程合计约 19.5 MiB，出/入≈9:1。",
+                    "tool_calls": []}
+
+        assistant.chat_completion = lazy_then_data
+        events_b = list(assistant.run_turn("doubao 收发的是心跳包吗？", "fallback-session"))
+        done_b = dict(events_b)["done"]
+        check("补查拿到数据 → 有据、不打未核实",
+              (done_b["grounded"], done_b["text"].startswith("⚠️")), (True, False))
+        check("补查结果作为内部信息注回上下文", "系统补查" in prompts_b[-1], True)
+        check("补查带上点名对象（match 检索）", "doubao" in prompts_b[-1], True)
 
         tries2 = {"n": 0}
 
-        def lazy_then_grounded(config, messages, tools):
+        def lazy_then_grounded(config, messages, tools, tool_choice=None):
             tries2["n"] += 1
             if tries2["n"] == 1:
                 return {"content": "不清楚。", "tool_calls": []}
@@ -412,7 +438,7 @@ try:
         # ③ 只调记忆工具 = 假证据：它读不出任何本机数据，照样要标"未核实"
         tries3 = {"n": 0}
 
-        def memory_only(config, messages, tools):
+        def memory_only(config, messages, tools, tool_choice=None):
             tries3["n"] += 1
             if tries3["n"] == 1:
                 return {"content": "", "tool_calls": [{
@@ -435,7 +461,7 @@ try:
             assistant.configure(memory_path=Path(tmp2) / "repeat.db")
             captured: list[list[dict]] = []
 
-            def capture(config, messages, tools):
+            def capture(config, messages, tools, tool_choice=None):
                 captured.append([dict(item) for item in messages])
                 if len(captured) % 2 == 1:      # 每次提问的第一轮：调一个取数工具
                     return {"content": "", "tool_calls": [{"id": "x", "function": {

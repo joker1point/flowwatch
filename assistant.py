@@ -984,7 +984,9 @@ def tools_for(scope: str) -> list[dict[str, Any]]:
 
 
 def run_tool(name: str, raw_args: Any, session_id: str = "default") -> dict[str, Any]:
-    """执行工具。参数校验失败**不抛异常**，而是把校验结果作为观察回给模型。"""
+    """执行工具。参数校验失败**不抛异常**，而是把校验结果作为观察回给模型。
+
+    """
     tool = _TOOL_BY_NAME.get(name)
     if tool is None:
         return {"error": f"没有这个工具：{name}", "available": sorted(_TOOL_BY_NAME)}
@@ -1126,12 +1128,19 @@ def _post_json(url: str, payload: dict[str, Any], headers: dict[str, str],
 
 
 def chat_completion(config: ProviderConfig, messages: list[dict[str, Any]],
-                    tools: list[dict[str, Any]]) -> dict[str, Any]:
-    """调一次 chat/completions，返回 assistant message（content + tool_calls）。"""
+                    tools: list[dict[str, Any]],
+                    tool_choice: str | None = None) -> dict[str, Any]:
+    """调一次 chat/completions，返回 assistant message（content + tool_calls）。
+
+    `tool_choice` 默认 "auto"；传 "required" = **协议层**要求必须调用某个工具。
+    支持面因 provider 而异（2026-09-22 实测：DashScope 兼容模式对 auto / required /
+    点名函数三种都接受），所以调用方一律走 `_completion()` —— 它会在 provider 不认这个
+    字段时退回 auto，不让一轮对话因为"强制失败"直接报错。
+    """
     payload: dict[str, Any] = {"model": config.model, "messages": messages, "temperature": 0.2}
     if tools:
         payload["tools"] = tools
-        payload["tool_choice"] = "auto"
+        payload["tool_choice"] = tool_choice or "auto"
     headers = {"Authorization": f"Bearer {config.api_key}"} if config.api_key else {}
     data = _post_json(f"{config.base_url}/chat/completions", payload, headers)
     choices = data.get("choices") or []
@@ -1142,6 +1151,130 @@ def chat_completion(config: ProviderConfig, messages: list[dict[str, Any]],
         "content": message.get("content") or "",
         "tool_calls": message.get("tool_calls") or [],
     }
+
+
+def _completion(config: ProviderConfig, messages: list[dict[str, Any]],
+                tools: list[dict[str, Any]], required: bool = False) -> dict[str, Any]:
+    """带"必须调用工具"的兼容包装：provider 不认 `tool_choice` 就如实退回 auto。
+
+    为什么要有这一层：纠正轮的意图是"这次必须先去查"，协议层强制比提示词叮嘱可靠
+    （提示词拦不住的情况实测过）。但本地 Ollama / 各家兼容 API 对这个字段的支持面不一样，
+    不支持时通常报 400/404/422 —— 那就退回 auto，如实降级而不是让整轮问答报错。
+    """
+    if not (required and tools):
+        return chat_completion(config, messages, tools)
+    try:
+        return chat_completion(config, messages, tools, tool_choice="required")
+    except urllib.error.HTTPError as exc:
+        if exc.code not in (400, 404, 422):
+            raise
+        return chat_completion(config, messages, tools)
+
+
+# ------------------------------------------------- 系统侧补查（零工具调用的兜底）
+# 触发条件（见 run_turn）：问题要本机数据，而模型**纠正之后仍然**一个工具都没调。
+# 这一层刻意不依赖模型合作 —— 服务端按问题类型跑确定性取数，把结果作为"系统补查"
+# 注回上下文，让模型基于真实数据重答。与其它手段的分工：
+#   · 提示词 / tool_choice：请模型自己查（首选，它选得比规则准）；
+#   · 系统补查：它两次都没查时，别让用户拿到的答案从"作废"开始；
+#   · 未核实标注：连补查也取不到数据时，如实标（红线不动）。
+# 规则表与 mock_turn 的演示规则同族，这里多了实体抽取（match）与明细档的两步链路。
+
+_FALLBACK_STOPWORDS = {"top", "ip", "dns", "exe", "app", "and", "the", "for", "this", "that"}
+
+_FALLBACK_RULES: tuple[tuple[tuple[str, ...], str, dict[str, Any]], ...] = (
+    (("域名", "网站", "domain", "访问"), "get_top_domains", {"minutes": 60, "limit": 8}),
+    (("事件", "变化", "尖峰", "出现", "消失", "异常"), "get_events", {"limit": 10}),
+    (("健康", "状态", "未归因", "丢包", "采集", "延迟"), "get_health", {}),
+    (("实时", "当前", "此刻", "这会儿"), "get_live_frame", {"top": 6}),
+    (("进程", "程序", "应用", "带宽", "流量", "占用", "排行", "排名", "最多", "第一",
+      "谁在", "哪些", "连接", "连了谁", "对端", "明细", "心跳", "上传", "下载", "发送", "接收"),
+     "get_top_processes", {"minutes": 60, "limit": 8}),
+)
+_FALLBACK_MAX_PICKS = 2
+
+
+def _fallback_entity(question: str) -> str | None:
+    """从问题里抽"点名对象"（英数名片段）当 match 用；抽不到返回 None。
+
+    全局性问题（"谁占带宽最多 / 一共多少"）**不抽** —— 传 match 会把答案缩成单对象，
+    这条在 get_top_processes 的 schema 里也写明了。
+    """
+    text = question or ""
+    if any(word in text for word in ("排行", "最多", "第一", "谁在", "哪些", "哪几个",
+                                     "一共", "总共", "总体", "整体")):
+        return None
+    for token in re.findall(r"[A-Za-z][A-Za-z0-9_.+-]{1,}", text):
+        name = token.strip("._+-").lower()
+        if len(name) >= 3 and name not in _FALLBACK_STOPWORDS:
+            return name
+    return None
+
+
+def _fallback_picks(question: str, scope: str) -> list[tuple[str, dict[str, Any]]]:
+    """按问题类型给出确定性取数清单：只用**当前档位可见**的工具（隐私分档不在这里破），最多两个。"""
+    lower = (question or "").lower()
+    allowed = {item["function"]["name"] for item in tools_for(scope)}
+    match = _fallback_entity(question)
+    picks: list[tuple[str, dict[str, Any]]] = []
+    for words, name, args in _FALLBACK_RULES:
+        if len(picks) >= _FALLBACK_MAX_PICKS:
+            break
+        if name in allowed and all(name != item[0] for item in picks) \
+                and any(word in lower for word in words):
+            picks.append((name, dict(args)))
+    if not picks:
+        # 认不出类型：**点名了对象**就按名字检索（比窗口快照贴题），否则给最便宜的实时快照
+        if match and "get_top_processes" in allowed:
+            picks.append(("get_top_processes", {"minutes": 60, "limit": 8}))
+        else:
+            picks.append(("get_live_frame", {"top": 6}) if "get_live_frame" in allowed
+                         else ("get_health", {}))
+    if match:          # 点名对象 → 排行类工具带 match（明细档还要靠它定位 pid）
+        picks = [(name, {**args, "match": match})
+                 if name in ("get_top_processes", "get_top_domains") else (name, args)
+                 for name, args in picks]
+    return picks
+
+
+def _fallback_evidence(result: Any) -> bool:
+    """补查结果算不算证据：**必须有内容**。空排行 = 这段时间没记录，不是证据。"""
+    if not _is_evidence_result(result):
+        return False
+    if isinstance(result, dict):
+        items = result.get("items")
+        if isinstance(items, list) and not items:
+            return False
+    return True
+
+
+def _fallback_fetch(question: str, scope: str, session_id: str) -> list[dict[str, Any]]:
+    """执行确定性补查（工具报错照实带回去，不吞）。明细档再补一步"连线明细"。"""
+    fetched: list[dict[str, Any]] = []
+    for name, args in _fallback_picks(question, scope):
+        fetched.append({"name": name, "args": args, "result": run_tool(name, args, session_id)})
+    # 明细档的关联只有实时窗口能给（历史层不保存"进程 ↔ 域名"），所以用刚查到的 pid 再补一条。
+    if scope == "detail" and not any(item["name"] == "get_live_connections" for item in fetched):
+        pid = next((int(item["pid"]) for entry in fetched
+                    if entry["name"] == "get_top_processes" and isinstance(entry["result"], dict)
+                    for item in (entry["result"].get("items") or [])
+                    if isinstance(item, dict) and item.get("pid")), None)
+        if pid:
+            args = {"pid": pid, "limit": 10}
+            fetched.append({"name": "get_live_connections", "args": args,
+                            "result": run_tool("get_live_connections", args, session_id)})
+    return fetched
+
+
+def _fallback_note(fetched: list[dict[str, Any]]) -> str:
+    """把补查结果作为**内部信息**注回上下文（这条消息用户看不到，但工具行会出现在面板上）。"""
+    lines = ["（系统补查 · 用户看不到这段）你连续两次没有调用任何工具，涉及本机数据的结论没有依据。",
+             "服务端已按问题类型代你执行下列取数，请直接基于这些结果作答：",
+             "· 不要把它复述成'我调用了工具'；空结果就如实说这段时间没有记录。"]
+    for item in fetched:
+        lines.append(f"\n[{item['name']} {json.dumps(item['args'], ensure_ascii=False)}]\n"
+                     f"{json.dumps(item['result'], ensure_ascii=False)}")
+    return "\n".join(lines)
 
 
 # ---------------------------------------------------------------- mock provider
@@ -1364,6 +1497,8 @@ def run_turn(question: str, session_id: str) -> Iterator[tuple[str, dict[str, An
     tools = tools_for(scope)
     answer = ""
     forced_grounding = False        # 是否因"首轮零工具调用"强制纠正过一轮
+    force_next = False              # 纠正轮的下一跳：协议层声明"必须调用工具"（见 _completion）
+    fallback_tools: list[str] = []  # 系统补查代跑的工具（模型两次零工具时的兜底）
 
     try:
         if config.name == "mock":
@@ -1378,7 +1513,8 @@ def run_turn(question: str, session_id: str) -> Iterator[tuple[str, dict[str, An
             answer = result["content"]
         else:
             for turn in range(MAX_TURNS):
-                message = chat_completion(config, messages, tools)
+                message = _completion(config, messages, tools, required=force_next)
+                force_next = False
                 calls = message["tool_calls"]
                 if not calls:
                     draft = (message["content"] or "").strip()
@@ -1388,8 +1524,30 @@ def run_turn(question: str, session_id: str) -> Iterator[tuple[str, dict[str, An
                     # 已确认错误"这类自我检讨 —— 而用户从没见过那份草稿（实测踩过）。
                     if turn == 0 and not forced_grounding and tools and needs_data:
                         forced_grounding = True
+                        force_next = True       # 纠正轮同时上协议层强制（不认的 provider 自动退回 auto）
                         messages.append({"role": "user", "content": GROUNDING_NUDGE})
                         continue
+                    # 第二次仍然零工具 → **系统侧补查**：服务端自己按问题类型跑确定性取数，
+                    # 把结果注回上下文让它基于真实数据重答。这是唯一不依赖模型合作的一层 ——
+                    # 补查也取不到数据时，才落到下面的"未核实"标注（红线不动）。
+                    # 触发条件是**整轮一个工具都没调用过**（`used_tools` 为空），刻意比"这一步没调"
+                    # 更窄：调过工具却没拿到数据（参数非法、只调了记忆工具）不在这里抢管 ——
+                    # 那两种情况继续由"未核实"标注兜底（红线用例 args-invalid-01 / memory-only-03）。
+                    if needs_data and not used_tools and not fallback_tools:
+                        fetched = _fallback_fetch(question, scope, session_id)
+                        if fetched:
+                            for item in fetched:
+                                fallback_tools.append(item["name"])
+                                used_tools.append(item["name"])
+                                if item["name"].startswith(DATA_TOOL_PREFIX) \
+                                        and _fallback_evidence(item["result"]):
+                                    evidence_tools.append(item["name"])
+                                yield "tool", {"name": item["name"], "args": item["args"],
+                                               "effect": _effect_of(item["name"]),
+                                               "origin": "system",   # 面板可据此标注"系统补查"
+                                               "result": _truncate(item["result"])}
+                            messages.append({"role": "system", "content": _fallback_note(fetched)})
+                            continue
                     answer = draft
                     break
                 messages.append({
@@ -1446,6 +1604,7 @@ def run_turn(question: str, session_id: str) -> Iterator[tuple[str, dict[str, An
         "evidence_tools": evidence_tools,   # 只算**成功返回数据**的取数工具
         "grounded": bool(evidence_tools),   # 本轮结论有没有数据证据
         "retried": forced_grounding,        # 是否触发过"零工具调用"纠正
+        "fallback": fallback_tools,         # 系统侧补查代跑的工具（模型两次零工具时的兜底）
         "unverified": unverified,           # 本轮是否被打上"未核实"标注（评估集直接断言这个）
         "memory_request": is_memory_request(question),   # 纯记忆操作请求（收据类）
         "needs_evidence": needs_data,       # 本轮是否按"要本机数据"对待（含追问继承）

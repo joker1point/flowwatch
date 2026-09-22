@@ -14,7 +14,7 @@ import type { AssistantStatus } from '../types'
 type Item =
   | { kind: 'user'; text: string }
   | { kind: 'assistant'; text: string; scope: string; tools: string[] }
-  | { kind: 'tool'; name: string; effect: string }
+  | { kind: 'tool'; name: string; effect: string; origin?: 'system' }
   | { kind: 'notice'; text: string }
 
 const SESSION_KEY = 'flowwatch-assistant-session'
@@ -88,9 +88,12 @@ function Row({ item }: { item: Item }) {
     return <p className="msg msg--user">{item.text}</p>
   }
   if (item.kind === 'tool') {
+    // origin=system：模型两次都没调工具时，服务端按问题类型代查的那次 —— 如实标出来，
+    // 不混进"模型调用"里（后端的 done.fallback 也会列出清单）
     return (
       <p className="msg msg--tool mono">
-        <span className="dim">调用</span> {item.name} <span className="dim">· {item.effect}</span>
+        <span className="dim">{item.origin === 'system' ? '系统补查' : '调用'}</span> {item.name}{' '}
+        <span className="dim">· {item.effect}</span>
       </p>
     )
   }
@@ -176,7 +179,10 @@ export function AssistantPanel() {
         } else if (event === 'tool') {
           setItems((prev) => [
             ...prev,
-            { kind: 'tool', name: String(data.name ?? ''), effect: String(data.effect ?? '') },
+            {
+              kind: 'tool', name: String(data.name ?? ''), effect: String(data.effect ?? ''),
+              origin: data.origin === 'system' ? 'system' : undefined,
+            },
           ])
         } else if (event === 'done') {
           setItems((prev) => [

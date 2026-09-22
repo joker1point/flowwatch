@@ -96,11 +96,13 @@ class ScriptedTransport:
         self.calls: list[dict] = []
         self.prompts: list[str] = []
         self.offered: list[list[str]] = []
+        self.tool_choices: list[str | None] = []   # 每跳向 provider 声明的 tool_choice（含 required）
 
-    def __call__(self, config, messages, tools):        # noqa: ARG002 - 签名随 assistant
+    def __call__(self, config, messages, tools, tool_choice=None):   # noqa: ARG002 - 签名随 assistant
         index = len(self.calls)
         self.prompts.append("\n".join(str(item.get("content") or "") for item in messages))
         self.offered.append([(t.get("function") or {}).get("name") for t in (tools or [])])
+        self.tool_choices.append(tool_choice)
         self.calls.append({"messages": messages, "tools": tools})
         step = self.script[index] if index < len(self.script) else {"content": "（评估脚本已用尽）"}
         return _to_response(step, index)
@@ -152,6 +154,14 @@ def _assert_run(checks: Checks, expect: dict, run_result: dict) -> None:
         checks.eq("retried", bool(done.get("retried")), expect["retried"])
     if "unverified" in expect:
         checks.eq("unverified（被打未核实标）", bool(done.get("unverified")), expect["unverified"])
+    if "tool_choice_required" in expect:
+        # 协议层强制：纠正轮那一跳必须向 provider 声明 tool_choice="required"（不是只发提示词）
+        seen = run_result.get("tool_choices") or []
+        checks.eq("纠正轮声明 tool_choice=required", "required" in seen,
+                  bool(expect["tool_choice_required"]))
+    for name in expect.get("fallback_all_of", []):
+        checks.add(f"系统补查代跑了 {name}", name in (done.get("fallback") or []),
+                   done.get("fallback"))
     if "memory_request" in expect:
         checks.eq("memory_request", bool(done.get("memory_request")), expect["memory_request"])
     if "needs_evidence" in expect:
@@ -250,6 +260,7 @@ def run_case_scripted(case: dict) -> dict:
                 "prompt": transport.prompts[-1] if transport.prompts else "",
                 "offered": transport.offered,
                 "calls": transport.calls,
+                "tool_choices": transport.tool_choices,
             }
             before = len(checks.rows)
             _assert_run(checks, run.get("expect") or {}, result)
@@ -326,7 +337,7 @@ def run_case_live(case: dict, base_url: str, record_dir: Path | None) -> dict:
         #     例如"要么有证据、要么明确标注未核实"，这才是系统真正保证的东西；
         #   · 否则退回 `expect` 里的结构性字段。
         run_result = {"done": done, "tool_events": tool_events,
-                      "prompt": "", "offered": [], "calls": []}
+                      "prompt": "", "offered": [], "calls": [], "tool_choices": []}
         variants = run.get("live_expect_any")
         if variants:
             probes = []

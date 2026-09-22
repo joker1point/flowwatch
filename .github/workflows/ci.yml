@@ -48,6 +48,12 @@ jobs:
       - name: 流量助手 · test_assistant
         run: python tests/test_assistant.py
 
+      # 行为评估集（scripted 档：脚本化模型 + stub 数据源，零网络、确定性）
+      # 与单测的分工：单测测零件，这里测"一轮对话的整体行为"（工具分级是否真落地、
+      # 证据判定、复制抑制、轮数上限）。用例见 evals/cases.jsonl。
+      - name: 助手行为评估集 · scripted
+        run: python evals/run_eval.py --mode scripted
+
   # Linux 只跑与平台无关的两个（ETW / 抓包层在 Linux 上本来就跑不了，不假装能跑）
   tests-linux:
     name: 跨平台测试 · ubuntu · py3.13
@@ -70,6 +76,9 @@ jobs:
 
       - name: 流量助手（pydantic 契约 + sqlite3 记忆层）
         run: python tests/test_assistant.py
+
+      - name: 助手行为评估集（scripted：stub 数据源，跨平台）
+        run: python evals/run_eval.py --mode scripted
 
   # 前端构建 = tsc --noEmit（类型检查）+ vite build。
   # VITE_API_BASE=/ 与演示包同口径：产物以相对路径请求 API，可直接交给单端口包装层。

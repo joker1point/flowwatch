@@ -16,6 +16,8 @@ assistant_memory.db
 # 运行期日志与临时产物
 _run/
 *.log
+web/_preview.out
+web/_preview.err
 
 # Catrace「flowwatch-alert」插件 sidecar 运行时状态（不入库）
 integrations/flowwatch-alert/runtime/state.json
@@ -70,3 +72,8 @@ notes/
 
 # 临时备份文件（例：assistant.py.bak-flowwatch-ai）
 *.bak-*
+
+# 评估集的运行产物：live 档的原始转写与逐次结果 JSON 里含**真模型的真实答案**
+# （可能带本机域名 / 进程名）——与截图脱敏同一条纪律：只留本地，别入库（见 evals/README.md）
+evals/fixtures/
+evals/results/

@@ -169,6 +169,50 @@ def route_scope(question: str) -> str:
     return "detail" if any(p in text for p in DETAIL_PATTERNS) else "aggregate"
 
 
+# ---------------------------------------------------------------- 只读门面
+
+class ReadOnlyStore:
+    """历史库的**只读门面**：助手只拿得到查询方法，写方法在类型上不存在。
+
+    为什么要有这一层：只读承诺不能停在"当前没有工具去写它"（那是**约定**）。`HistoryStore`
+    上有 `append` / `submit` / `start_writer` / `stop_writer` / `close` / `set_name_resolver`，
+    过去是随整个对象一起注入给助手的 —— 一次重构、一个新工具就能顺手用上，而且没人会注意到。
+    这里与"明细工具在聚合档压根不注入"用同一套路：**物理隔离，不是提示词承诺**。
+
+    刻意**不实现 `__getattr__`**：那会把写方法一起透传回来，等于没做门面。
+    """
+
+    #：真 `HistoryStore` 上的写面（评估集/单测据此断言"门面确实挡住了它们"）
+    FORBIDDEN = ("open", "append", "submit", "start_writer", "stop_writer", "close",
+                 "set_name_resolver")
+
+    __slots__ = ("_store",)
+
+    def __init__(self, store: Any) -> None:
+        self._store = store
+
+    def stats(self) -> dict[str, Any]:
+        return self._store.stats()
+
+    def top_processes(self, *args: Any, **kwargs: Any) -> list[dict[str, Any]]:
+        return self._store.top_processes(*args, **kwargs)
+
+    def top_domains(self, *args: Any, **kwargs: Any) -> list[dict[str, Any]]:
+        return self._store.top_domains(*args, **kwargs)
+
+    def timeline(self, *args: Any, **kwargs: Any) -> dict[str, Any]:
+        return self._store.timeline(*args, **kwargs)
+
+    def events(self, *args: Any, **kwargs: Any) -> list[dict[str, Any]]:
+        return self._store.events(*args, **kwargs)
+
+    def process_series(self, *args: Any, **kwargs: Any) -> dict[str, Any]:
+        return self._store.process_series(*args, **kwargs)
+
+    def __repr__(self) -> str:
+        return "<ReadOnlyStore>"
+
+
 # ---------------------------------------------------------------- 数据源注入
 
 class _Source:
@@ -186,7 +230,8 @@ def configure(hub: Any = None, store: Any = None, capturer: Any = None,
     if hub is not None:
         _Source.hub = hub
     if store is not None:
-        _Source.store = store
+        # 只挂只读门面（见 ReadOnlyStore）：助手没有"写历史库"的能力，不是"我们不写"
+        _Source.store = ReadOnlyStore(store)
     if capturer is not None:
         _Source.capturer = capturer
     if memory_path is not None:
@@ -972,24 +1017,46 @@ TOOLS: tuple[Tool, ...] = (
 _TOOL_BY_NAME = {tool.name: tool for tool in TOOLS}
 
 
+def memory_write_enabled() -> bool:
+    """是否给助手"写自己记忆库"的权限（默认给）。
+
+    记忆是 **agent 自己的状态**，不是观测数据 —— 所以默认 auto。`off` 时**结构上关掉**：
+    `tools_for()` 不再注入 `memory_*` 写工具，`run_tool()` 也会拒绝（防模型凭空点名叫它）。
+    写法与隐私分档一致：不是叮嘱它别写，而是它写不了。
+    """
+    return (os.environ.get("FLOWWATCH_ASSISTANT_MEMORY_WRITE") or "auto").strip().lower() != "off"
+
+
 def tools_for(scope: str) -> list[dict[str, Any]]:
     """按档位给出工具清单 —— "物理隔离"就落在这个函数里。
 
-    记忆类工具始终可用（它不碰数据暴露面）；明细工具只在 D 档出现。
+    记忆类工具始终可用（它不碰数据暴露面，且读记忆的 conversation_search 不需要写权限）；
+    明细工具只在 D 档出现；`FLOWWATCH_ASSISTANT_MEMORY_WRITE=off` 时写记忆的三个也摘掉。
     """
     allowed = [tool for tool in TOOLS if tool.scope in ("aggregate", "memory")]
     if scope == "detail":
         allowed += [tool for tool in TOOLS if tool.scope == "detail"]
+    if not memory_write_enabled():
+        allowed = [tool for tool in allowed if not tool.name.startswith("memory_")]
     return [tool.spec() for tool in allowed]
 
 
 def run_tool(name: str, raw_args: Any, session_id: str = "default") -> dict[str, Any]:
     """执行工具。参数校验失败**不抛异常**，而是把校验结果作为观察回给模型。
 
+    执行前有两道**硬闸**（纵深防御，不是给模型看的提示词）：
+      · 档位闸：明细工具在非明细档直接拒绝 —— 模型被诱导、或幻觉点名叫它都没用
+        （"不在工具列表里"只是第一道；模型完全可以凭记忆拼出工具名）；
+      · 记忆写闸：`FLOWWATCH_ASSISTANT_MEMORY_WRITE=off` 时拒绝写记忆（读的照常）。
     """
     tool = _TOOL_BY_NAME.get(name)
     if tool is None:
         return {"error": f"没有这个工具：{name}", "available": sorted(_TOOL_BY_NAME)}
+    if tool.scope == "detail" and _Source.scope != "detail":
+        return {"error": f"{name} 在当前数据档位不可用（明细档才对模型开放）",
+                "scope": _Source.scope}
+    if tool.name.startswith("memory_") and not memory_write_enabled():
+        return {"error": "记忆写入已关闭（FLOWWATCH_ASSISTANT_MEMORY_WRITE=off）"}
     try:
         args = tool.args.model_validate(raw_args if isinstance(raw_args, dict) else {})
     except ValidationError as exc:

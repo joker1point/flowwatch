@@ -21,6 +21,38 @@ def _proc_row(pid: int, process: str, total: int) -> dict:
 
 
 class FakeStore:
+    """假历史层。
+
+    **刻意保留真 `HistoryStore` 上的写方法**（且一调就炸）：只读门面要挡的就是它们 ——
+    桩里没有写方法的话，"门面被绕过（助手重新拿到可写库）"这类回退根本测不出来。
+    """
+
+    # ---- 写面：与 history.HistoryStore 同形，只为让"只读门面"可被证伪 ----
+    def _deny(self, name: str):
+        raise AssertionError(f"助手不该能调历史库的写方法 {name}（只读门面被绕过了）")
+
+    def open(self) -> None:
+        self._deny("open")
+
+    def append(self, window: dict) -> bool:
+        self._deny("append")
+
+    def submit(self, window: dict) -> None:
+        self._deny("submit")
+
+    def start_writer(self) -> None:
+        self._deny("start_writer")
+
+    def stop_writer(self) -> None:
+        self._deny("stop_writer")
+
+    def close(self) -> None:
+        self._deny("close")
+
+    def set_name_resolver(self, resolver) -> None:
+        self._deny("set_name_resolver")
+
+    # ---- 读面：工具真正会用的 ----
     def stats(self) -> dict:
         return {"retention_days": 30, "oldest": "2026-09-17T08:00:00", "buckets": 11, "events": 3}
 

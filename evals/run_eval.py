@@ -30,6 +30,7 @@ import sys
 import tempfile
 import time
 import urllib.request
+from contextlib import contextmanager
 from pathlib import Path
 
 EVALS = Path(__file__).resolve().parent
@@ -111,13 +112,38 @@ class ScriptedTransport:
 def _to_response(step: dict, index: int) -> dict:
     calls = []
     for i, call in enumerate(step.get("tool_calls") or []):
+        # `"$PID"` 占位符 = 本次评估进程自己的 pid：让"读进程身份"这类必须指向真进程的
+        # 用例也能保持确定性（psutil 一定能读到评估进程自己）。
+        args = {key: (os.getpid() if value == "$PID" else value)
+                for key, value in (call.get("args") or {}).items()}
         calls.append({
             "id": f"eval-{index}-{i}",
             "type": "function",
             "function": {"name": call["name"],
-                         "arguments": json.dumps(call.get("args") or {}, ensure_ascii=False)},
+                         "arguments": json.dumps(args, ensure_ascii=False)},
         })
     return {"content": step.get("content") or "", "tool_calls": calls}
+
+
+@contextmanager
+def _case_env(case: dict):
+    """用例级环境变量（如 FLOWWATCH_ASSISTANT_MEMORY_WRITE=off）：跑完逐键还原。
+
+    为什么需要：有些判据验的是"开关关掉之后系统还挡不挡得住"，那必须真的改环境变量，
+    而不能在用例里假装关了。
+    """
+    sentinel = object()
+    wanted = case.get("env") or {}
+    saved = {key: os.environ.get(key, sentinel) for key in wanted}
+    os.environ.update({key: str(value) for key, value in wanted.items()})
+    try:
+        yield
+    finally:
+        for key, value in saved.items():
+            if value is sentinel:
+                os.environ.pop(key, None)
+            else:
+                os.environ[key] = str(value)
 
 
 def _install_source(tmp: Path) -> None:
@@ -239,12 +265,18 @@ def _assert_run(checks: Checks, expect: dict, run_result: dict) -> None:
 def run_case_scripted(case: dict) -> dict:
     session = f"eval-{case['id']}"
     runs: list[dict] = []
-    with tempfile.TemporaryDirectory() as tmp:
+    with _case_env(case), tempfile.TemporaryDirectory() as tmp:
         tmp_path = Path(tmp)
         _install_source(tmp_path)
+        checks = Checks()
+        # 只读门面（结构承诺）：助手拿到的历史库不该有写方法 —— 每个用例都顺带验一次，
+        # 这样"把只读门面换回原对象"这种回退会被每一条用例抓住。
+        store = assistant._Source.store
+        leaked = [name for name in assistant.ReadOnlyStore.FORBIDDEN if hasattr(store, name)]
+        checks.add("助手拿到的历史库是只读门面（写方法都拿不到）", not leaked,
+                   f"{type(store).__name__} 暴露 {leaked}" if leaked else type(store).__name__)
         for label, value in (case.get("seed_memory") or {}).items():
             assistant.MEMORY.block_write(label, value)
-        checks = Checks()
         for index, run in enumerate(case["runs"]):
             transport = ScriptedTransport(run.get("script") or [])
             assistant.chat_completion = transport

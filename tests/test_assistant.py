@@ -42,7 +42,34 @@ def _proc_row(pid: int, process: str, total: int) -> dict:
 class FakeStore:
     """假历史层。Doubao.exe 故意给两个 pid —— 模拟 Electron 那种"一个应用十几个进程"，
     09-20 事故正是"小写 doubao 没命中 Doubao.exe"，这里用来钉死 match 的语义。
+
+    **刻意保留真 HistoryStore 的写方法**（且一调就炸）：只读门面要挡的就是它们 ——
+    桩里没有写方法的话，"门面被绕过"这类回退根本测不出来。
     """
+
+    def _deny(self, name: str):
+        raise AssertionError(f"助手不该能调历史库的写方法 {name}（只读门面被绕过了）")
+
+    def open(self) -> None:
+        self._deny("open")
+
+    def append(self, window: dict) -> bool:
+        self._deny("append")
+
+    def submit(self, window: dict) -> None:
+        self._deny("submit")
+
+    def start_writer(self) -> None:
+        self._deny("start_writer")
+
+    def stop_writer(self) -> None:
+        self._deny("stop_writer")
+
+    def close(self) -> None:
+        self._deny("close")
+
+    def set_name_resolver(self, resolver) -> None:
+        self._deny("set_name_resolver")
 
     def stats(self) -> dict:
         return {"retention_days": 30, "oldest": "2026-09-17T08:00:00", "buckets": 11, "events": 3}
@@ -184,9 +211,12 @@ check("查不到事件时提醒'没有事件 ≠ 没有流量'", "没有事件 �
 check("事件条数与截断标记", assistant.run_tool("get_events", {"limit": 1})["truncated"], True)
 no_window = assistant.run_tool("get_events", {"limit": 5})
 check("没给时间窗时提示要带上 minutes", "minutes" in no_window["note"], True)
+_scope_was = assistant._Source.scope
+assistant._Source.scope = "detail"       # 明细工具的执行前提（run_tool 里有档位硬闸）
 check("明细工具能取对端",
       assistant.run_tool("get_live_connections", {"pid": 84812})["connections"][0]["remote"],
       "10.44.99.5:49716")
+assistant._Source.scope = _scope_was
 
 # 进程身份：读 exe 版本资源（厂商/产品），路径按档位隔离 —— 用测试进程自己当样本
 check("身份工具在聚合档可见", "get_process_identity" in agg, True)
@@ -493,6 +523,65 @@ finally:
 # 恢复第 7 段之前设的配置隔离（该段的 finally 只负责环境变量）
 assistant.CONFIG_PATH = _saved_config_path
 assistant._ENV_FILE_LOADED = _saved_env_loaded
+
+# ---------------------------------------------------------------- 10. 只读承诺
+# 只读不是"我们没写"，而是"写不了"：
+#   · 历史库以**只读门面**注入（写方法在对象上不存在）；
+#   · 执行前两道硬闸（档位 / 记忆写开关）—— 模型幻觉点名叫它也拒绝。
+# 09-22 第八轮加。为什么必须挡在 run_tool：明细工具只是"不注入"，模型完全可以凭名字拼出来调。
+print("\n=== 只读承诺：只读门面 + 执行前的硬闸 ===")
+store = assistant._Source.store
+check("助手拿到的是只读门面", type(store).__name__, "ReadOnlyStore")
+check("历史库的写方法一个都拿不到（结构，不是约定）",
+      [name for name in assistant.ReadOnlyStore.FORBIDDEN if hasattr(store, name)], [])
+check("查询面照常可用", callable(getattr(store, "top_processes", None)), True)
+
+_scope_saved = assistant._Source.scope
+try:
+    assistant._Source.scope = "aggregate"
+    denied = assistant.run_tool("get_live_connections", {"pid": 84812, "limit": 5})
+    check("聚合档下明细工具被硬闸拒绝（不是只在列表里不出现）",
+          "当前数据档位不可用" in str(denied.get("error")), True)
+    assistant._Source.scope = "detail"
+    allowed = assistant.run_tool("get_live_connections", {"pid": 84812, "limit": 5})
+    check("明细档下同一工具正常可用", "connections" in allowed, True)
+finally:
+    assistant._Source.scope = _scope_saved
+
+_mem_saved = os.environ.get("FLOWWATCH_ASSISTANT_MEMORY_WRITE")
+try:
+    os.environ["FLOWWATCH_ASSISTANT_MEMORY_WRITE"] = "off"
+    offered = [item["function"]["name"] for item in assistant.tools_for("aggregate")]
+    check("开关 off：写记忆的工具不再注入", [n for n in offered if n.startswith("memory_")], [])
+    check("开关 off：读记忆的 conversation_search 仍在", "conversation_search" in offered, True)
+    blocked = assistant.run_tool("memory_insert", {"label": "human", "text": "测试"})
+    check("开关 off：硬闸拒绝写入（模型幻觉点名也没用）",
+          "记忆写入已关闭" in str(blocked.get("error")), True)
+    os.environ.pop("FLOWWATCH_ASSISTANT_MEMORY_WRITE", None)
+    check("默认（auto）：写记忆的工具照常注入",
+          "memory_insert" in [item["function"]["name"] for item in assistant.tools_for("aggregate")],
+          True)
+finally:
+    if _mem_saved is None:
+        os.environ.pop("FLOWWATCH_ASSISTANT_MEMORY_WRITE", None)
+    else:
+        os.environ["FLOWWATCH_ASSISTANT_MEMORY_WRITE"] = _mem_saved
+
+# 字段级隔离：完整路径（含用户名）只在明细档给出
+_scope_saved = assistant._Source.scope
+try:
+    assistant._Source.scope = "aggregate"
+    agg = assistant.run_tool("get_process_identity", {"pid": os.getpid()})
+    assistant._Source.scope = "detail"
+    det = assistant.run_tool("get_process_identity", {"pid": os.getpid()})
+    if isinstance(agg, dict) and isinstance(det, dict) and det.get("path"):
+        check("聚合档不给完整路径", "path" in agg, False)
+        check("聚合档给出替代说明", "隐私分级" in str(agg.get("path_note", "")), True)
+        check("明细档才给完整路径", bool(det.get("path")), True)
+    else:
+        print("  · 本平台读不到 exe 路径（非 Windows / 无权限）→ 跳过字段级隔离断言")
+finally:
+    assistant._Source.scope = _scope_saved
 
 print(f"\n{'全部通过' if not FAILURES else '失败项: ' + ', '.join(FAILURES)}")
 raise SystemExit(1 if FAILURES else 0)

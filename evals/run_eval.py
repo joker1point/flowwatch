@@ -154,6 +154,9 @@ def _assert_run(checks: Checks, expect: dict, run_result: dict) -> None:
         checks.eq("unverified（被打未核实标）", bool(done.get("unverified")), expect["unverified"])
     if "memory_request" in expect:
         checks.eq("memory_request", bool(done.get("memory_request")), expect["memory_request"])
+    if "needs_evidence" in expect:
+        checks.eq("needs_evidence（按数据问题对待）", bool(done.get("needs_evidence")),
+                  expect["needs_evidence"])
     for name in expect.get("tools_all_of", []):
         checks.add(f"调用了 {name}", name in tools, tools)
     for name in expect.get("tools_none_of", []):
@@ -294,10 +297,21 @@ def run_case_live(case: dict, base_url: str, record_dir: Path | None) -> dict:
     transcript: list[dict] = []
     for index, run in enumerate(case["runs"]):
         session = f"eval-{case['id']}-{int(time.time())}"
-        try:
-            got = _post_sse(base_url, run["question"], session)
-        except Exception as exc:                       # noqa: BLE001 - 如实报错，不算"跳过"
-            checks.add(f"第 {index + 1} 轮请求成功", False, f"{type(exc).__name__}: {exc}")
+        # 瞬时传输错误重试一次：实测遇到过 RemoteDisconnected（服务端日志全是 200，纯抖动）——
+        # 把它算成"行为失败"会污染结论，所以重试一次；仍失败才如实记红。
+        got: dict | None = None
+        for attempt in range(2):
+            try:
+                got = _post_sse(base_url, run["question"], session)
+                break
+            except Exception as exc:                   # noqa: BLE001 - 如实报错，不算"跳过"
+                if attempt == 1:
+                    checks.add(f"第 {index + 1} 轮请求成功", False,
+                               f"{type(exc).__name__}: {exc}（重试 1 次后仍失败）")
+                else:
+                    print(f"       · {case['id']}：传输抖动（{type(exc).__name__}: {exc}），重试一次")
+                    time.sleep(2)
+        if got is None:
             runs.append({"ok": False})
             continue
         done = got["dict"].get("done")

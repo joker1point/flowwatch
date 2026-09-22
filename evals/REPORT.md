@@ -1,6 +1,6 @@
-# flowwatch Agent 评估报告（2026-09-22 17:04）
+# flowwatch Agent 评估报告（2026-09-22 18:05）
 
-## scripted 档：20/20 通过
+## scripted 档：23/23 通过
 
 - **口径**：脚本化模型（响应序列由用例给出）+ stub 数据源，零网络、确定性。
 - **测的是系统守卫**：工具分级是否真的不把明细工具给模型、证据判定（grounded/retried）、
@@ -15,11 +15,12 @@
 | 记忆写入 | 3 | 3 |
 | 记忆召回 | 1 | 1 |
 | 重复提问 | 1 | 1 |
-| 证据纠正 | 3 | 3 |
+| 证据纠正 | 5 | 5 |
 | 分档 | 2 | 2 |
 | 工具契约 | 2 | 2 |
 | 循环护栏 | 1 | 1 |
 | 不可答问 | 1 | 1 |
+| 多轮 | 1 | 1 |
 
 | id | 类别 | 结果 | 工具 | grounded | retried | 档位 | 模型往返 |
 |---|---|---|---|---|---|---|---|
@@ -43,8 +44,11 @@
 | `unsupported-process-domain-01` | 不可答问 | ✅ | - | False | True | aggregate | 2 |
 | `args-invalid-02` | 工具契约 | ✅ | get_top_processes, get_top_processes | True | False | aggregate | 3 |
 | `memory-write-02` | 记忆写入 | ✅ | memory_insert | False | False | aggregate | 2 |
+| `guard-detail-without-evidence-01` | 证据纠正 | ✅ | - | False | True | detail | 2 |
+| `multiturn-pronoun-01` | 多轮 | ✅ | get_top_processes | True | False | aggregate | 2 |
+| `followup-inherit-01` | 证据纠正 | ✅ | get_top_processes | True | False | aggregate | 2 |
 
-## live 档：16/16 通过
+## live 档：19/19 通过
 
 - **口径**：真模型 + 真数据（本机运行中的 flowwatch），只断言结构性判据
   （工具 / 档位 / 证据标志 / 前缀），不比对具体数字；模型与该次数据构成都会影响结果，
@@ -57,11 +61,12 @@
 | 身份 | 1 | 1 |
 | 事件 | 1 | 1 |
 | 重复提问 | 1 | 1 |
-| 证据纠正 | 3 | 3 |
+| 证据纠正 | 5 | 5 |
 | 分档 | 2 | 2 |
 | 工具契约 | 2 | 2 |
 | 循环护栏 | 1 | 1 |
 | 不可答问 | 1 | 1 |
+| 多轮 | 1 | 1 |
 
 | id | 类别 | 结果 | 工具 | grounded | retried | 档位 | 模型往返 |
 |---|---|---|---|---|---|---|---|
@@ -69,18 +74,21 @@
 | `rank-memory-scope-02` | 排行 | ✅ | get_top_processes | True | False | aggregate | - |
 | `match-hit-01` | 点名检索 | ✅ | get_top_processes | True | False | aggregate | - |
 | `match-miss-01` | 点名检索 | ✅ | get_top_processes | True | False | aggregate | - |
-| `identity-miss-01` | 身份 | ✅ | get_process_identity | True | False | aggregate | - |
+| `identity-miss-01` | 身份 | ✅ | get_process_identity | True | True | aggregate | - |
 | `events-01` | 事件 | ✅ | get_events | True | False | aggregate | - |
 | `repeat-question-01` | 重复提问 | ✅ | get_top_processes | True | False | aggregate | - |
-| `grounding-retry-01` | 证据纠正 | ✅ | - | False | True | aggregate | - |
-| `grounding-unverified-02` | 证据纠正 | ✅ | - | False | True | aggregate | - |
-| `grounding-memory-only-03` | 证据纠正 | ✅ | get_live_frame, get_top_domains | True | False | aggregate | - |
-| `scope-detail-01` | 分档 | ✅ | get_top_processes, get_live_connections | True | False | detail | - |
+| `grounding-retry-01` | 证据纠正 | ✅ | get_top_domains | True | False | aggregate | - |
+| `grounding-unverified-02` | 证据纠正 | ✅ | get_top_domains | True | False | aggregate | - |
+| `grounding-memory-only-03` | 证据纠正 | ✅ | get_top_domains | True | False | aggregate | - |
+| `scope-detail-01` | 分档 | ✅ | get_process_identity, get_live_connections | True | False | detail | - |
 | `scope-aggregate-02` | 分档 | ✅ | get_top_processes | True | False | aggregate | - |
 | `args-invalid-01` | 工具契约 | ✅ | get_top_processes, get_top_domains | True | False | aggregate | - |
 | `max-turns-01` | 循环护栏 | ✅ | get_top_processes | True | False | aggregate | - |
-| `unsupported-process-domain-01` | 不可答问 | ✅ | get_top_processes, get_top_domains | True | True | aggregate | - |
+| `unsupported-process-domain-01` | 不可答问 | ✅ | get_top_processes | True | True | aggregate | - |
 | `args-invalid-02` | 工具契约 | ✅ | get_top_processes, get_top_domains | True | False | aggregate | - |
+| `guard-detail-without-evidence-01` | 证据纠正 | ✅ | get_process_identity, get_live_connections | True | False | detail | - |
+| `multiturn-pronoun-01` | 多轮 | ✅ | get_top_processes | True | False | aggregate | - |
+| `followup-inherit-01` | 证据纠正 | ✅ | get_top_processes | True | False | aggregate | - |
 
 ## 口径与已知问题
 

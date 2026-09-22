@@ -122,6 +122,14 @@ def _answer_has_data_claims(text: str) -> bool:
     return bool(_DATA_CLAIM_RE.search(text or ""))
 
 
+def _previous_user_question(session_id: str, current: str) -> str:
+    """同一会话里上一句用户提问（用来把"数据意图"继承给追问）。"""
+    for item in reversed(MEMORY.history(session_id, 8)):
+        if item.get("role") == "user" and item.get("content") != current:
+            return str(item.get("content") or "")
+    return ""
+
+
 def _is_evidence_result(result: Any) -> bool:
     """这次取数调用是否**真的拿到了数据**。
 
@@ -133,9 +141,17 @@ def _is_evidence_result(result: Any) -> bool:
 
 
 def needs_evidence(question: str) -> bool:
-    """问题是否在要"本机实际数据"：决定零工具调用时要不要强制纠正一轮。"""
+    """问题是否在要"本机实际数据"：决定零工具调用时要不要强制纠正一轮。
+
+    明细档的问题**也是要数据** —— 两个词表必须一致。实测漏网（2026-09-22 联调）：
+    问"Steam++ 连了谁？给我对端明细"时 `route_scope` 已经升到 detail（系统知道这是明细问题），
+    但 `needs_evidence` 因为词表里没有"连了谁/对端/明细"而返回 False → 模型一次工具没调、
+    答案里还引了"当前系统中…"，**却连"未核实"标都没有**。所以这里直接复用分档判据。
+    """
     text = (question or "").lower()
-    return any(pattern in text for pattern in DATA_INTENT_PATTERNS)
+    if any(pattern in text for pattern in DATA_INTENT_PATTERNS):
+        return True
+    return route_scope(question) == "detail"
 
 # ---------------------------------------------------------------- 数据分级
 
@@ -1219,6 +1235,9 @@ SYSTEM_PROMPT = """你是 flowwatch 的流量分析助手。flowwatch 运行在�
 - 判断类结论必须贴定量证据（连接数、单连接平均字节、出/入比），别只给"能/不能判断"。
 - 数据被 limit 截断时必须说明"这是最近 N 条样本，非全量"。
 - 用户问"为什么/怎么回事"时，先查排行、历史、事件，再下结论。
+- **代词先把指代查清楚**：用户说"它/他/这个"时，先用上一轮点名对象的 match 检索拿到数据，
+  不要因为"指代不明"就放弃查数据、直接给一段泛泛的话（实测踩过：多轮里"它是哪个软件？"
+  模型一个字都没查就作答，被打了"未核实"标）。
 - 字节用 MiB/GiB，速率用 KiB/s、MiB/s；时间用本地时间。
 - 归因口径要说清：pid > 0 才是具体进程；"未归因"= 说不清是谁的，"属主受限"= 非提权
   拿不到 PID 的，两者都单独记账，不混进进程排行。
@@ -1310,6 +1329,12 @@ def run_turn(question: str, session_id: str) -> Iterator[tuple[str, dict[str, An
 
     MEMORY.append(session_id, "user", question)
 
+    # 追问继承上一轮的数据意图（实测漏网 2026-09-22 联调）："那 doubao 呢？"这类短追问不含任何
+    # 数据关键词 —— 纯词表判定会漏，于是模型在正文里写了一次**没真发生**的工具调用也没人管。
+    # 规则：本轮不含数据词时，看同一会话里上一句是不是数据问题；是则本轮也按数据问题对待。
+    needs_data = bool(needs_evidence(question)
+                      or needs_evidence(_previous_user_question(session_id, question)))
+
     messages: list[dict[str, Any]] = [
         {"role": "system", "content": SYSTEM_PROMPT.format(scope=scope)}
     ]
@@ -1361,7 +1386,7 @@ def run_turn(question: str, session_id: str) -> Iterator[tuple[str, dict[str, An
                     # 把草稿一起带回去，模型才知道"刚才那份不算数"。
                     # 刻意**不把草稿放回上下文**：放回去它就会在终稿里写"此前回答系编造、
                     # 已确认错误"这类自我检讨 —— 而用户从没见过那份草稿（实测踩过）。
-                    if turn == 0 and not forced_grounding and tools and needs_evidence(question):
+                    if turn == 0 and not forced_grounding and tools and needs_data:
                         forced_grounding = True
                         messages.append({"role": "user", "content": GROUNDING_NUDGE})
                         continue
@@ -1406,7 +1431,7 @@ def run_turn(question: str, session_id: str) -> Iterator[tuple[str, dict[str, An
         name.startswith("memory_") or name == "conversation_search" for name in used_tools)
     exempt = (is_memory_request(question) and memory_only
               and not _answer_has_data_claims(answer))
-    unverified = bool(needs_evidence(question) and not evidence_tools and not exempt)
+    unverified = bool(needs_data and not evidence_tools and not exempt)
     if unverified:
         answer = UNVERIFIED_NOTE + answer
 
@@ -1423,6 +1448,7 @@ def run_turn(question: str, session_id: str) -> Iterator[tuple[str, dict[str, An
         "retried": forced_grounding,        # 是否触发过"零工具调用"纠正
         "unverified": unverified,           # 本轮是否被打上"未核实"标注（评估集直接断言这个）
         "memory_request": is_memory_request(question),   # 纯记忆操作请求（收据类）
+        "needs_evidence": needs_data,       # 本轮是否按"要本机数据"对待（含追问继承）
         "compacted": compacted,
         "memory": {"sessions": state["sessions"], "messages": state["messages"],
                    "compacted": state["compacted"],

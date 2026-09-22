@@ -162,6 +162,27 @@ check("明细档只比聚合档多（是超集）", det >= agg, True)
 check("明细工具只在明细档出现", sorted(n for n in agg if n in detail_only), [])
 check("两档并集 = 工具全集（没有分档外的隐藏工具）", sorted(agg | det), sorted(names))
 
+# ---- 复合保证（不变式）：注入面可以松，执行面不能松 ----
+# 将来任何扩展机制（hook / 插件 / 配置）最多只能"多给模型看几个工具"，绝不能因此让明细工具
+# 在聚合档真的跑起来。这条测试就是那个不变式的钉子 —— 它比"再测一遍硬闸"更强：
+# 它规定的是"硬闸不依赖注入面"，所以引入任何扩展点之前，这条必须绿。
+_saved_tools_for = assistant.tools_for
+_saved_scope = assistant._Source.scope
+try:
+    assistant.tools_for = lambda scope: [tool.spec() for tool in assistant.TOOLS]   # 故意全放
+    leaked = {item["function"]["name"] for item in assistant.tools_for("aggregate")}
+    check("（模拟）注入面被放宽后，明细工具确实出现在清单里", "get_live_connections" in leaked, True)
+    assistant._Source.scope = "aggregate"
+    denied = assistant.run_tool("get_live_connections", {"pid": 84812, "limit": 5})
+    check("注入面被放宽，执行闸仍然拒绝（不变式：能力边界不依赖注入面）",
+          "当前数据档位不可用" in str(denied.get("error")), True)
+finally:
+    assistant.tools_for = _saved_tools_for
+    assistant._Source.scope = _saved_scope
+check("复原后注入面照旧（明细工具不在聚合档）",
+      "get_live_connections" in {item["function"]["name"]
+                                for item in assistant.tools_for("aggregate")}, False)
+
 _saved = os.environ.get("FLOWWATCH_ASSISTANT_MEMORY_WRITE")
 try:
     os.environ["FLOWWATCH_ASSISTANT_MEMORY_WRITE"] = "off"

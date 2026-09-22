@@ -97,6 +97,40 @@ UNVERIFIED_NOTE = "⚠️ 本轮未调用任何工具核实，以下内容没有
 # 本机数据 —— 实测：模型只调 memory_insert 就顺带编出"Tabbit 占出向带宽 62%"，当时 grounded 还是 True。
 DATA_TOOL_PREFIX = "get_"
 
+# 纯记忆操作类请求（"记一下 / 帮我盯着 / 忘掉"）：这类问题的答案是"收据"，不是数据结论 ——
+# 不该被打"未核实"前缀。但**只要答案里出现带单位的数字**（= 在给数据结论），前缀照样加：
+# 这条红线来自 09-20 那次"只写记忆却编出占出向带宽 62%"。两处口径都由评估集发现（2026-09-22 修）。
+MEMORY_INTENT_PATTERNS = (
+    "记一下", "记录一下", "记下", "帮我记", "写进记忆", "记到", "存一下", "记个",
+    "帮我盯", "盯着", "关注一下", "忘掉", "删除记忆", "删掉这条", "更新记忆", "改一下记忆",
+)
+
+_DATA_CLAIM_RE = re.compile(
+    r"\d+(?:\.\d+)?\s*(?:%|KiB|MiB|GiB|TiB|KB|MB|GB|TB|bps|kbps|Mbps|Gbps|B/s)",
+    re.IGNORECASE,
+)
+
+
+def is_memory_request(question: str) -> bool:
+    """问题是不是"要求做一次记忆操作"（而不是问数据）。"""
+    text = (question or "").lower()
+    return any(pattern in text for pattern in MEMORY_INTENT_PATTERNS)
+
+
+def _answer_has_data_claims(text: str) -> bool:
+    """答案里有没有带单位的数字（= 它在给数据结论）。"""
+    return bool(_DATA_CLAIM_RE.search(text or ""))
+
+
+def _is_evidence_result(result: Any) -> bool:
+    """这次取数调用是否**真的拿到了数据**。
+
+    踩过的坑：`grounded` 只看"调没调 get_*"时，参数校验失败（Pydantic 拦下、返回
+    {"error": "参数不合法"}）也会被算成证据 —— 于是一个没拿到任何数据的一轮，在面板上
+    显示成"已核实"。证据 = 取数工具 **且** 结果里没有 error。
+    """
+    return isinstance(result, dict) and "error" not in result
+
 
 def needs_evidence(question: str) -> bool:
     """问题是否在要"本机实际数据"：决定零工具调用时要不要强制纠正一轮。"""
@@ -1253,6 +1287,7 @@ def run_turn(question: str, session_id: str) -> Iterator[tuple[str, dict[str, An
     scope = route_scope(question)
     tool_trace: list[dict[str, Any]] = []
     used_tools: list[str] = []
+    evidence_tools: list[str] = []      # 只收"成功返回数据"的取数工具（见 _is_evidence_result）
     _Source.session_id = session_id
     _Source.scope = scope          # 工具的字段级隐私分级（如完整路径只在 detail 档出）
 
@@ -1310,6 +1345,8 @@ def run_turn(question: str, session_id: str) -> Iterator[tuple[str, dict[str, An
             result = mock_turn(question, scope, tool_trace, session_id)
             for item in tool_trace:
                 used_tools.append(item["name"])
+                if item["name"].startswith(DATA_TOOL_PREFIX) and _is_evidence_result(item["result"]):
+                    evidence_tools.append(item["name"])
                 yield "tool", {"name": item["name"], "args": item["args"],
                                "effect": _effect_of(item["name"]),
                                "result": _truncate(item["result"])}
@@ -1344,6 +1381,8 @@ def run_turn(question: str, session_id: str) -> Iterator[tuple[str, dict[str, An
                         args = {}
                     result = run_tool(name, args, session_id)
                     used_tools.append(name)
+                    if name.startswith(DATA_TOOL_PREFIX) and _is_evidence_result(result):
+                        evidence_tools.append(name)
                     yield "tool", {"name": name, "args": args,
                                    "effect": _effect_of(name),
                                    "result": _truncate(result)}
@@ -1358,10 +1397,17 @@ def run_turn(question: str, session_id: str) -> Iterator[tuple[str, dict[str, An
         yield "error", {"message": f"{type(exc).__name__}: {exc}"}
         return
 
-    # 数据类问题却一个取数工具都没跑过（含"只调了记忆工具"这种假证据）→ 显式标注未核实。
-    # 记忆工具只写/读记忆，读不出任何本机数据，不能算证据。
-    evidence_tools = [name for name in used_tools if name.startswith(DATA_TOOL_PREFIX)]
-    if needs_evidence(question) and not evidence_tools:
+    # 数据类问题却一个取数工具都没**成功**跑过（含"只调了记忆工具"这种假证据）→ 显式标注未核实。
+    # 两处细化（都由评估集发现，2026-09-22 修）：
+    #   ① 证据 = **成功返回数据**的取数调用（参数校验失败的调用不算，见 _is_evidence_result）；
+    #   ② 纯记忆操作请求（"记一下/帮我盯着"）在"只调了记忆工具 + 答案里没有带单位的数字"时豁免
+    #      —— 收据不再被误标，而"只写记忆却答数据"那条红线仍然守得住。
+    memory_only = bool(used_tools) and all(
+        name.startswith("memory_") or name == "conversation_search" for name in used_tools)
+    exempt = (is_memory_request(question) and memory_only
+              and not _answer_has_data_claims(answer))
+    unverified = bool(needs_evidence(question) and not evidence_tools and not exempt)
+    if unverified:
         answer = UNVERIFIED_NOTE + answer
 
     MEMORY.append(session_id, "assistant", answer, scope=scope, tools=tuple(used_tools))
@@ -1372,9 +1418,11 @@ def run_turn(question: str, session_id: str) -> Iterator[tuple[str, dict[str, An
         "text": answer,
         "scope": scope,
         "tools": used_tools,
-        "evidence_tools": evidence_tools,   # 只算取数工具
+        "evidence_tools": evidence_tools,   # 只算**成功返回数据**的取数工具
         "grounded": bool(evidence_tools),   # 本轮结论有没有数据证据
         "retried": forced_grounding,        # 是否触发过"零工具调用"纠正
+        "unverified": unverified,           # 本轮是否被打上"未核实"标注（评估集直接断言这个）
+        "memory_request": is_memory_request(question),   # 纯记忆操作请求（收据类）
         "compacted": compacted,
         "memory": {"sessions": state["sessions"], "messages": state["messages"],
                    "compacted": state["compacted"],

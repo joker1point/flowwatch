@@ -150,6 +150,10 @@ def _assert_run(checks: Checks, expect: dict, run_result: dict) -> None:
         checks.eq("grounded", bool(done.get("grounded")), expect["grounded"])
     if "retried" in expect:
         checks.eq("retried", bool(done.get("retried")), expect["retried"])
+    if "unverified" in expect:
+        checks.eq("unverified（被打未核实标）", bool(done.get("unverified")), expect["unverified"])
+    if "memory_request" in expect:
+        checks.eq("memory_request", bool(done.get("memory_request")), expect["memory_request"])
     for name in expect.get("tools_all_of", []):
         checks.add(f"调用了 {name}", name in tools, tools)
     for name in expect.get("tools_none_of", []):

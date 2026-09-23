@@ -923,6 +923,15 @@ class Capturer:
         self._capture_threads = []
         self._capture_stops = []
 
+    def is_capturing(self) -> bool:
+        """抓包线程是否真在跑。
+
+        为什么不用 `device_name` 判断：它只表示"选过设备"——句柄静默失效、或抓包线程
+        异常退出之后它仍然在，只有线程存活状态才代表"此刻真有包进来"。
+        （`server.py` 的 `/api/capture/retry` 靠它决定"要不要重来一次"。）
+        """
+        return any(thread.is_alive() for thread in self._capture_threads)
+
     # ---- 看门狗：句柄「静默失效」自愈
     def _watchdog_loop(self) -> None:
         """检测「句柄活着但不再产包」的静默失效，并按当前设备重开抓包。

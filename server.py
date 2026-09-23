@@ -325,6 +325,34 @@ def health() -> dict[str, Any]:
     }
 
 
+@app.post("/api/capture/retry")
+async def capture_retry() -> dict[str, Any]:
+    """重新尝试启动采集层 —— 给「刚装完 Npcap，不想重启程序」的人一个按钮。
+
+    为什么进程内重试成立：`Capturer.pcap` 是**懒加载属性**，加载失败时不会把异常缓存
+    下来，下次访问会重新 `WinDLL("wpcap.dll")` —— 驱动刚装好立刻就能被加载。
+
+    边界：
+      · 已经在采集 → 直接回 `already`（不重复开句柄、不重复起线程）；
+      · 重试失败 → 异常照旧落到 `capturer.error`，**绝不让服务因此不可用**
+        （界面、历史库、流量助手都不依赖采集层）。
+    """
+    if capturer.is_capturing():
+        return {"ok": True, "already": True, "device": capturer.device_name,
+                "error": capturer.error, "detail": "采集已在运行"}
+    await asyncio.to_thread(capturer.stop)     # 上次可能留下半启动状态（线程/句柄）：先停干净
+    capturer.error = None                      # 粘性错误清掉，让 health 反映本次结果
+    try:
+        await asyncio.to_thread(capturer.start)
+    except Exception as exc:  # PcapError 或任何启动异常
+        capturer.error = f"{type(exc).__name__}: {exc}"
+        logger.warning("采集层重试失败（界面与助手照常可用）: %s", exc)
+        return {"ok": False, "already": False, "device": capturer.device_name,
+                "error": capturer.error}
+    logger.info("采集层重试成功，设备: %s", capturer.device_name)
+    return {"ok": True, "already": False, "device": capturer.device_name, "error": None}
+
+
 @app.get("/api/meta")
 async def meta() -> dict[str, Any]:
     return {

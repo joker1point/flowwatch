@@ -25,6 +25,22 @@ async function getJson<T>(path: string): Promise<T> {
 export const fetchMeta = () => getJson<Meta>('/api/meta')
 export const fetchHealth = () => getJson<Health>('/api/health')
 
+/* 采集层重试：机器刚装好 Npcap / WinPcap 时，不必重启程序（首启引导里的按钮） */
+
+export interface CaptureRetry {
+  ok: boolean
+  already: boolean
+  device: string
+  error: string | null
+  detail?: string
+}
+
+export async function retryCapture(): Promise<CaptureRetry> {
+  const response = await fetch(`${API_BASE}/api/capture/retry`, { method: 'POST' })
+  if (!response.ok) throw new Error(`重试采集 HTTP ${response.status}`)
+  return (await response.json()) as CaptureRetry
+}
+
 export async function fetchRates(limit = 50): Promise<RateFrame> {
   return getJson<RateFrame>(`/api/rates?limit=${limit}`)
 }

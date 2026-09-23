@@ -1,6 +1,7 @@
-import { useEffect, useMemo, useState } from 'react'
+import { useCallback, useEffect, useMemo, useState } from 'react'
 import { fetchEvents, fetchHealth, fetchProcessHistory, fetchTopDomains } from './api'
 import { AssistantPanel } from './components/AssistantPanel'
+import { CaptureGuide } from './components/CaptureGuide'
 import { ConnDetail } from './components/ConnDetail'
 import { DomainList } from './components/DomainList'
 import { EventFeed } from './components/EventFeed'
@@ -49,23 +50,19 @@ export default function App() {
     }
   }, [])
 
-  // health 变化慢（端点表成本、累计包数），5 秒一次就够，不必挤进每秒的速率帧
-  useEffect(() => {
-    let alive = true
-    const load = () => {
-      fetchHealth()
-        .then((value) => {
-          if (alive) setHealth(value)
-        })
-        .catch(() => undefined)
-    }
-    load()
-    const id = window.setInterval(load, 5000)
-    return () => {
-      alive = false
-      window.clearInterval(id)
-    }
+  // health 变化慢（端点表成本、累计包数），5 秒一次就够，不必挤进每秒的速率帧。
+  // 抽成 useCallback：首启引导里点「重新检测」成功后立刻刷一次，不必干等这 5 秒轮询。
+  const loadHealth = useCallback(() => {
+    fetchHealth()
+      .then((value) => setHealth(value))
+      .catch(() => undefined)
   }, [])
+
+  useEffect(() => {
+    loadHealth()
+    const id = window.setInterval(loadHealth, 5000)
+    return () => window.clearInterval(id)
+  }, [loadHealth])
 
   // 事件流：历史层按分钟落桶，15 秒拉一次足够，别跟每秒的速率帧抢资源
   useEffect(() => {
@@ -147,14 +144,14 @@ export default function App() {
       {!connected && error ? <div className="banner">连接中断：{error} —— 正在自动重连…</div> : null}
 
       {/* 服务活着但采集层没起来（最常见：没装 Npcap）——如实说清"为什么没数据、要做什么"，
-          而不是让页面停在一句"正在挑选网卡…"上（2026-09-23 真实用户反馈） */}
+          而不是让页面停在一句"正在挑选网卡…"上（2026-09-23 真实用户反馈）。
+          缺驱动 → 首启引导（三步 + 下载 + 重新检测，免重启）；其他原因 → 一行横幅照旧。 */}
       {connected && health?.error ? (
-        <div className="banner">
-          采集层未启用：{health.error}
-          {/wpcap|Npcap/i.test(health.error)
-            ? ' —— 装好 Npcap 后重启本程序即可；界面、历史库与流量助手照常可用。'
-            : ''}
-        </div>
+        /wpcap|npcap/i.test(health.error) ? (
+          <CaptureGuide error={health.error} onRefresh={loadHealth} />
+        ) : (
+          <div className="banner">采集层未启用：{health.error}</div>
+        )
       ) : null}
 
       <nav className="viewSwitch" role="tablist" aria-label="视图">

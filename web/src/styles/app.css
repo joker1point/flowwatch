@@ -113,6 +113,58 @@ body {
   font-size: 12px;
 }
 
+/* ── 首启引导：缺抓包驱动（没装 Npcap）时替代一行红横幅 ─────────────────
+   比横幅多说三件事：为什么要装、三步怎么装、装完点哪里重试（免重启）。 */
+.guide {
+  display: flex;
+  flex-direction: column;
+  gap: var(--s-2);
+  margin-bottom: var(--s-3);
+  padding: var(--s-3);
+  border: 1px solid var(--danger);
+  border-radius: var(--radius-md);
+  background: var(--danger-soft);
+}
+
+.guide__head { display: flex; flex-wrap: wrap; align-items: baseline; gap: var(--s-3); }
+.guide__head b { color: var(--text-primary); font-size: 13px; }
+.guide__why { color: var(--text-muted); font-family: var(--font-mono); font-size: 11px; }
+
+.guide__steps {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+  margin: 0;
+  padding-left: 18px;
+  color: var(--text-secondary);
+  font-size: 12px;
+}
+.guide__steps b { color: var(--text-primary); }
+
+.guide__actions { display: flex; flex-wrap: wrap; align-items: center; gap: var(--s-3); }
+
+.guide__link {
+  color: var(--accent);
+  font-size: 12px;
+  text-decoration: none;
+  border-bottom: 1px dashed var(--accent-line);
+}
+
+.guide__cta {
+  padding: 5px 12px;
+  border: 1px solid var(--accent-line);
+  border-radius: var(--radius-sm);
+  background: var(--bg-raised);
+  color: var(--text-primary);
+  font-size: 12px;
+  cursor: pointer;
+}
+.guide__cta:hover:not(:disabled) { border-color: var(--accent); }
+.guide__cta:disabled { opacity: 0.65; cursor: progress; }
+
+.guide__result { font-size: 12px; color: var(--text-secondary); }
+.guide__foot { margin: 0; color: var(--text-muted); font-size: 11px; }
+
 /* ── 工具条 ─────────────────────────────────────────────────────────── */
 .toolbar {
   display: flex;

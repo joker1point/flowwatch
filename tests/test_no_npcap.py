@@ -15,7 +15,9 @@ uvicorn 从来没起来（崩溃栈：run.py:125 → server.py:225 → collector
   1. 服务进程**还活着**（没被采集层拖死）；
   2. `/api/health` 返回 200，且 `status == "degraded"`；
   3. `error` 里说明是 Npcap/wpcap 的问题（页面/接口要能告诉用户"去装驱动"，而不是白屏）；
-  4. 若有前端构建产物，用 `run.py` 启动时 `/` 必须返回 HTML（= 用户真能看到页面）。
+  4. 若有前端构建产物，用 `run.py` 启动时 `/` 必须返回 HTML（= 用户真能看到页面）；
+  5. 首启引导的「重新检测」（`POST /api/capture/retry`）在**仍然没有驱动**时如实回
+     `ok=false`、且**不能把服务弄死**（这是那个按钮能存在的前提）。
 
 入口会自动选：有 `web/dist` 走 `run.py`（用户双击 / exe 的那条路），没有则退回
 `server.py`（CI 的测试 job 不构建前端）。**两条路都要能过**，所以启动参数按入口给：
@@ -77,6 +79,14 @@ def get_text(url: str, timeout: float = 4.0) -> tuple[int, str]:
         return resp.status, resp.read().decode("utf-8", "replace")
 
 
+def post_json(url: str, timeout: float = 120.0):
+    """POST 一个空 JSON 体（重试端点不吃参数）。超时给得宽：挑网卡是逐张试抓的。"""
+    req = urllib.request.Request(url, data=b"{}", method="POST",
+                                 headers={"Content-Type": "application/json"})
+    with urllib.request.urlopen(req, timeout=timeout) as resp:
+        return resp.status, json.loads(resp.read().decode("utf-8"))
+
+
 def main() -> int:
     work = Path(tempfile.mkdtemp(prefix="flowwatch-nonpcap-"))
     inject = work / "site"
@@ -118,6 +128,22 @@ def main() -> int:
             message = f"{health.get('error') or ''}"
             check("error 指明是 Npcap/wpcap", ("Npcap" in message or "wpcap" in message), True)
             check("device 为空但服务在（没数据≠没服务）", not health.get("device"), True)
+
+            # 首启引导的「我已装好，重新检测」走这条。CI 里没有 wpcap，所以断言的是
+            # **优雅失败**：如实回 ok=false，而且服务必须还活着 —— 否则那个按钮就是坑。
+            try:
+                code, retry = post_json(f"http://127.0.0.1:{port}/api/capture/retry")
+                retry_error = f"{retry.get('error') or ''}"
+                check("重试端点 HTTP 200", code, 200)
+                check("没有驱动时如实回 ok=false", retry.get("ok"), False)
+                check("重试失败后 error 仍指明 Npcap/wpcap",
+                      ("Npcap" in retry_error or "wpcap" in retry_error), True)
+                check("重试之后进程还活着", proc.poll() is None, True)
+                _, health_after = get_json(f"http://127.0.0.1:{port}/api/health")
+                check("重试之后 health 仍 degraded（不是假 ok）",
+                      health_after.get("status"), "degraded")
+            except (urllib.error.URLError, TimeoutError, json.JSONDecodeError) as exc:
+                check("重试端点可达", f"{type(exc).__name__}: {exc}", "200")
         if entry.name == "run.py" and health:
             try:
                 status, html = get_text(f"http://127.0.0.1:{port}/")

@@ -53,6 +53,12 @@ jobs:
       - name: 只读承诺 · test_readonly
         run: python tests/test_readonly.py
 
+      # 无 Npcap 的降级契约：**服务与页面必须照开**。
+      # 这条是真实用户反馈换来的：没装 Npcap 的机器会在 `import server` 阶段抛 PcapError，
+      # 进程直接退出 → 页面打不开（而 run.py 上一行还打印着"界面能打开"）。
+      - name: 无 Npcap 降级 · test_no_npcap
+        run: python tests/test_no_npcap.py
+
       # 行为评估集（scripted 档：脚本化模型 + stub 数据源，零网络、确定性）
       # 与单测的分工：单测测零件，这里测"一轮对话的整体行为"（工具分级是否真落地、
       # 证据判定、复制抑制、轮数上限）。用例见 evals/cases.jsonl。
@@ -84,6 +90,9 @@ jobs:
 
       - name: 只读承诺（AST 调用图分析，跨平台）
         run: python tests/test_readonly.py
+
+      - name: 无 Npcap 降级（服务照起、页面照开，跨平台）
+        run: python tests/test_no_npcap.py
 
       - name: 助手行为评估集（scripted：stub 数据源，跨平台）
         run: python evals/run_eval.py --mode scripted

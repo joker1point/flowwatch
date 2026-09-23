@@ -146,6 +146,17 @@ export default function App() {
 
       {!connected && error ? <div className="banner">连接中断：{error} —— 正在自动重连…</div> : null}
 
+      {/* 服务活着但采集层没起来（最常见：没装 Npcap）——如实说清"为什么没数据、要做什么"，
+          而不是让页面停在一句"正在挑选网卡…"上（2026-09-23 真实用户反馈） */}
+      {connected && health?.error ? (
+        <div className="banner">
+          采集层未启用：{health.error}
+          {/wpcap|Npcap/i.test(health.error)
+            ? ' —— 装好 Npcap 后重启本程序即可；界面、历史库与流量助手照常可用。'
+            : ''}
+        </div>
+      ) : null}
+
       <nav className="viewSwitch" role="tablist" aria-label="视图">
         <button
           type="button"

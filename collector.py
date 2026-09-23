@@ -737,7 +737,13 @@ class Capturer:
         endpoint_refresh: float = DEFAULT_ENDPOINT_REFRESH,
         include_loopback: bool = True,
     ) -> None:
-        self.pcap = Pcap()
+        # **wpcap 必须懒加载**（见下面的 pcap 属性）：server.py 在**模块级**构造
+        # `capturer = collector.Capturer()`，若在这里就 `Pcap()`，没装 Npcap 的机器会在
+        # `import server` 阶段抛 PcapError → HTTP 服务根本起不来。
+        # 2026-09-23 真实用户反馈"双击 exe 后页面打不开"就是这条：
+        # 崩溃栈 run.py:125 → server.py:225 → collector.py:740 → collector.py:98，
+        # 而同一份日志上一行还写着"在此之前界面能打开，但不会有流量数据"。
+        self._pcap: Pcap | None = None
         self.device = device
         self.include_loopback = include_loopback
         self.index = EndpointIndex(endpoint_refresh)
@@ -801,6 +807,19 @@ class Capturer:
             pass
         if ips:
             self.local_ips = ips
+
+    @property
+    def pcap(self) -> "Pcap":
+        """懒加载 wpcap.dll：**首次真要抓包时才加载**（见 __init__ 里的注释）。
+
+        为什么不在 __init__ 里加载：`server.py` 在模块级构造 Capturer()，加载失败会变成
+        "import 期异常" → 进程直接退出（用户双击后页面打不开）。挪到 start() 这条路径上之后，
+        异常会被 `server.py` 的 `_start_capturer()` 接住（它本来就为此而写）：
+        界面照开、`/api/health` 报 `degraded` 并写明"需要安装 Npcap（https://npcap.com）"。
+        """
+        if self._pcap is None:
+            self._pcap = Pcap()
+        return self._pcap
 
     # ---- 设备选择
     def pick_devices(self) -> list[str]:

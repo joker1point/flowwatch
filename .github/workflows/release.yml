@@ -48,6 +48,10 @@ jobs:
         run: python tests/test_etw_batch.py
       - name: 流量助手 · test_assistant
         run: python tests/test_assistant.py
+      # 发布前必须验的降级契约：**没装 Npcap 的机器上，界面也要能打开**
+      # （2026-09-23 真实反馈：v1.0.1 的 exe 在无 Npcap 机器上 import 期就崩了）
+      - name: 无 Npcap 降级 · test_no_npcap
+        run: python tests/test_no_npcap.py
 
   # 产物 1：源码 + 预构建前端（Linux 上组装即可，zip 与平台无关）
   package:

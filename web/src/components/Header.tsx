@@ -65,9 +65,15 @@ export function Header({ frame, health, connected, beats }: Props) {
             {health ? `${health.endpoint.count} · ${health.endpoint.source} ${health.endpoint.refresh_ms.toFixed(0)}ms` : '—'}
           </dd>
         </div>
-        <div className="stat stat--wide">
+        <div className={`stat stat--wide ${health?.error ? 'stat--warn' : ''}`}>
           <dt>抓包设备</dt>
-          <dd className="mono dim">{health?.device ? shortDevice(health.device) : '正在挑选网卡…'}</dd>
+          <dd className="mono dim">
+            {health?.device
+              ? shortDevice(health.device)
+              : health?.error
+                ? '未启用采集'      // 有 error 时别再说"正在挑选网卡…" —— 那会让人一直等
+                : '正在挑选网卡…'}
+          </dd>
         </div>
       </dl>
     </header>

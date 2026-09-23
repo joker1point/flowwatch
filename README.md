@@ -57,9 +57,14 @@ python run.py
 2. 双击 `start.cmd`（首次运行会自动 `pip install` 依赖）；
 3. 浏览器自动打开 http://127.0.0.1:8791/ —— 界面与 API 同源单端口。
 
-两点如实说明：**Npcap 是驱动级依赖，必须单独安装**（https://npcap.com/#download，未装则界面能开、
-但没有数据）；助手默认 **mock** 档（不联网、仍真跑工具与记忆链路），点面板右上「模型设置」
-可换成任意 OpenAI 兼容 API 或本地 Ollama。上面 ③ 的 `run.py` 就是一键包里的启动器。
+两点如实说明：**Npcap 是驱动级依赖，必须单独安装**（https://npcap.com/#download）；助手默认 **mock**
+档（不联网、仍真跑工具与记忆链路），点面板右上「模型设置」可换成任意 OpenAI 兼容 API 或本地 Ollama。
+上面 ③ 的 `run.py` 就是一键包里的启动器。
+
+**没装 Npcap 时会发生什么（有回归测试钉着）**：界面与 API **照常可用**、历史库与流量助手也照常工作，
+只是没有采集数据 —— 页头会显示「未启用采集」并挂一条横幅写明需要安装 Npcap（`test_no_npcap.py`
+把这条契约钉进了 CI；v1.0.1 的包在这条上曾经是坏的：`import server` 阶段就抛 `PcapError` 退出，
+用户看到的是"页面打不开"，详见 `docs/handoff/flowwatch.md` §7 第十轮）。
 
 需要**不装 Python 也能跑**的单文件形态（维护者向）：用 PyInstaller 打包即可 ——
 

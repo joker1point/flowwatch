@@ -150,6 +150,10 @@ jobs:
         env:
           VITE_API_BASE: "/"
         run: npm run build
+      # 这里 dist 已构建，于是测试会走 run.py —— 与 exe 的入口**同一条路**。
+      # （tests job 没有 dist，只能退回 server.py；两条路都要绿才算过。）
+      - name: 无 Npcap 降级 · run.py 入口（与 exe 同一条路）
+        run: python tests/test_no_npcap.py
       - name: "PyInstaller 打包（spec = onedir + web/dist）"
         run: python -m PyInstaller packaging/flowwatch.spec --noconfirm
       - name: 组装 exe 包（附一份 ASCII 使用说明）

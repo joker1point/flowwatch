@@ -16,6 +16,10 @@ uvicorn 从来没起来（崩溃栈：run.py:125 → server.py:225 → collector
   2. `/api/health` 返回 200，且 `status == "degraded"`；
   3. `error` 里说明是 Npcap/wpcap 的问题（页面/接口要能告诉用户"去装驱动"，而不是白屏）；
   4. 若有前端构建产物，用 `run.py` 启动时 `/` 必须返回 HTML（= 用户真能看到页面）。
+
+入口会自动选：有 `web/dist` 走 `run.py`（用户双击 / exe 的那条路），没有则退回
+`server.py`（CI 的测试 job 不构建前端）。**两条路都要能过**，所以启动参数按入口给：
+`--no-browser` 只有 run.py 有，对 server.py 传它会 exit(2)（2026-09-23 的 CI 就这么红的）。
 """
 
 from __future__ import annotations
@@ -82,14 +86,16 @@ def main() -> int:
     # 有构建产物就测 run.py（用户双击的那条路），否则退回 server.py（CI 里没有 dist）
     entry = ROOT / "run.py" if (ROOT / "web" / "dist" / "index.html").exists() else ROOT / "server.py"
     port = free_port()
+    # 参数按入口给：`--no-browser` 是 run.py 独有的。给 server.py 传它会 exit(2)，
+    # 进程当场死、下面两条断言全红 —— 而且本地有 dist 时永远走 run.py，所以只有 CI 会红。
+    argv = [sys.executable, str(entry), "--port", str(port), "--no-history"]
+    if entry.name == "run.py":
+        argv.append("--no-browser")
     env = {**os.environ, "PYTHONPATH": str(inject), "PYTHONIOENCODING": "utf-8",
            "FLOWWATCH_DATA_DIR": str(work / "data")}
     out = (work / "out.log").open("w+", encoding="utf-8")
     err = (work / "err.log").open("w+", encoding="utf-8")
-    proc = subprocess.Popen(
-        [sys.executable, str(entry), "--port", str(port), "--no-browser", "--no-history"],
-        cwd=str(ROOT), env=env, stdout=out, stderr=err,
-    )
+    proc = subprocess.Popen(argv, cwd=str(ROOT), env=env, stdout=out, stderr=err)
     print(f"[i] 启动 {entry.name}（端口 {port}，wpcap 被注入为不可加载）")
     health = None
     try:
@@ -102,6 +108,9 @@ def main() -> int:
                 break
             except (urllib.error.URLError, TimeoutError, json.JSONDecodeError):
                 time.sleep(0.5)
+        if proc.poll() is not None:
+            print(f"[i] 进程已退出：exit code = {proc.returncode}"
+                  "（参数不认 / 依赖缺失会死在这一步，而不是采集层的问题）")
         check("服务进程活着（没被采集层拖死）", proc.poll() is None, True)
         check("health 接口可用", health is not None, True)
         if health:

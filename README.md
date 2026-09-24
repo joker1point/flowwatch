@@ -71,6 +71,16 @@ python run.py
 v1.0.1 的包在这条上曾经是坏的：`import server` 阶段就抛 `PcapError` 退出，用户看到的是"页面打不开"，
 详见 `docs/handoff/flowwatch.md` §7 第十 / 十二轮。
 
+**为什么必须你自己装（许可事实，2026-09-24 核对官网原文）**：Npcap 是 Nmap 项目的第三方内核驱动，
+其**免费版许可不允许随其他软件一起再分发**（官网原文：`may be used (but not externally distributed)`），
+所以本仓库既不打包它的安装器、也不代跑安装 —— Wireshark 同样是单独提供它。另两条同源事实：
+免费版许可**限定 5 台机器**（只有与 Nmap / Wireshark / Microsoft Defender for Identity 一起使用时不受此限）；
+**静默安装属于 Npcap OEM 商业版功能**，免费版必须走安装向导并授权管理员权限。
+三者合起来意味着"无感自动安装"在这条链路上**不存在**——这是许可与商业限制，不是技术限制；
+个人自用无需担心，公司批量部署请购买 OEM 授权。引导里的下载按钮指向**当前版本**的官方安装包直链
+（`npcap.com/dist/npcap-1.89.exe`）；版本更新后改 `web/src/components/CaptureGuide.tsx` 顶部那一行即可
+（本工具不为了查版本而主动出站）。
+
 需要**不装 Python 也能跑**的单文件形态（维护者向）：用 PyInstaller 打包即可 ——
 
 ```bash

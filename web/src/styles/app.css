@@ -150,6 +150,12 @@ body {
   border-bottom: 1px dashed var(--accent-line);
 }
 
+/* 次级入口（官网页）：别跟主下载按钮抢注意力 */
+.guide__link--minor {
+  color: var(--text-muted);
+  border-bottom-style: dotted;
+}
+
 .guide__cta {
   padding: 5px 12px;
   border: 1px solid var(--accent-line);

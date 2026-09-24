@@ -8,7 +8,12 @@ interface Props {
   onRefresh: () => void
 }
 
-const NPCAP_URL = 'https://npcap.com/#download'
+// 直链指向**当前版本**的官方安装包（版本号取自 npcap.com 首页 property="softwareVersion"；
+// 2026-09-24 核对 = 1.89，实测 HTTP 200 / 1.26 MB）。版本更新后改这一行即可 ——
+// 之所以不每次联网去查最新版：本工具的原则是"不主动出站"，这条也写进了 README 的许可说明。
+const NPCAP_INSTALLER = 'https://npcap.com/dist/npcap-1.89.exe'
+// 官网页留作次级入口：直链失效、或用户想要别的版本时用
+const NPCAP_PAGE = 'https://npcap.com/#download'
 
 /**
  * 首启引导：机器缺抓包驱动（实际最常见的就是没装 Npcap）时，把
@@ -51,16 +56,24 @@ export function CaptureGuide({ error, onRefresh }: Props) {
 
       <ol className="guide__steps">
         <li>
-          去官网装 <b>Npcap</b>（Windows 抓包驱动，装一次即可；安装向导保持默认，
-          不用勾 WinPcap 兼容模式）
+          点下面第一个链接下载安装 <b>Npcap</b>（Windows 抓包驱动，装一次即可）：向导保持默认
+          （不用勾 WinPcap 兼容模式），Windows 会要一次<b>管理员授权</b>，允许即可
         </li>
         <li>装完<b>不用重启电脑</b>，也不用重启本程序</li>
         <li>回到这里点「我已装好，重新检测」</li>
       </ol>
 
       <div className="guide__actions">
-        <a className="guide__link" href={NPCAP_URL} target="_blank" rel="noreferrer">
-          下载 Npcap（npcap.com）
+        <a className="guide__link" href={NPCAP_INSTALLER} target="_blank" rel="noreferrer">
+          下载 Npcap 1.89 安装包（1.3 MB）
+        </a>
+        <a
+          className="guide__link guide__link--minor"
+          href={NPCAP_PAGE}
+          target="_blank"
+          rel="noreferrer"
+        >
+          官网页面（换版本 / 直链失效时用）
         </a>
         <button type="button" className="guide__cta" onClick={retry} disabled={busy}>
           {busy ? '检测中…（要逐张网卡试抓，约几秒）' : '我已装好，重新检测'}
@@ -69,8 +82,9 @@ export function CaptureGuide({ error, onRefresh }: Props) {
       </div>
 
       <p className="guide__foot">
-        仍然检测不到时：关掉本程序重新双击一次（个别机器上驱动服务要稍后才起来）。
-        在这之前，界面、历史库与流量助手都照常可用。
+        为什么不能替你装好：Npcap 是 Nmap 项目的第三方驱动，免费版许可不允许随其他软件一起分发
+        （见 README《没装 Npcap 时会发生什么》）。仍然检测不到时：关掉本程序重新双击一次
+        （个别机器上驱动服务要稍后才起来）；在这之前，界面、历史库与流量助手都照常可用。
       </p>
     </div>
   )

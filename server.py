@@ -48,7 +48,7 @@ import notes
 
 logger = logging.getLogger("flowwatch.server")
 
-VERSION = "1.0.2"           # 对外版本（/api/meta 暴露；发版时与 git tag 一起改）
+VERSION = "1.0.3"           # 对外版本（/api/meta 暴露；发版时与 git tag 一起改）
 HOST = "127.0.0.1"
 PORT = 8788
 # 与项目（或 exe）同目录，便于连同库一起备份；打包成 exe 时落在 exe 旁边（见 datadir.py）

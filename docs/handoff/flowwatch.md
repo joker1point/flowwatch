@@ -1,7 +1,7 @@
 # flowwatch 交接文档（独立自包含)
 
 > 本文件只涉及 **flowwatch**。升级/排查 flowwatch 时**只需加载本文件**。
-> 开源仓库:github.com/joker1point/flowwatch ｜ 本机路径:`frontend-works/flowwatch` ｜ 最近更新:2026-09-23(**v1.0.2 已发布**:没装 Npcap 也能打开界面;一键包 + 免 Python exe;tag `v1.0.2` → `25aa643`)。
+> 开源仓库:github.com/joker1point/flowwatch ｜ 本机路径:`frontend-works/flowwatch` ｜ 最近更新:2026-09-24(**v1.0.3 已发布**:缺 Npcap 时给首启引导 + 装完**免重启**即可采上;tag `v1.0.3` → `768c436`)。
 >
 > **本文件位置(2026-09-23 变更)**:原在 `frontend-works/docs/handoff/flowwatch.md`(工作区,**未纳版本管理**),
 > 现搬进仓库本体 = **`flowwatch/docs/handoff/flowwatch.md`**(随仓库版本管理);工作区那份已删除。
@@ -20,6 +20,7 @@ cd web; npm run build; npx vite preview --port 4173   # 前端(构建后静态�
 python run.py                          # 等价于双击 start.cmd(一键包入口)
 ```
 
+- **v1.0.3(09-24 已发布)**:资产同前(两个包 + 各自 sha256);内容是**首启引导 + 装完免重启的重试**(第十二轮,代码提交 `3d4685e` + `a164ec1`,版本号提交 `768c436`);`/api/meta` 报 `1.0.3`
 - **v1.0.2(09-23 已发布)**:资产布局同 v1.0.1(两个包 + 各自 sha256),内容是"没装 Npcap 也能打开界面"的修复(第十/十一轮);`/api/meta` 报 `1.0.2`(版本号唯一维护点 = `server.py` 的 `VERSION`)
 - **v1.0.1(09-21)**:Release 两个资产 —— `-windows.zip`(源码+预构建前端,双击 `start.cmd`)与 `-win64-exe.zip`(**免 Python**,双击 `flowwatch.exe`);两者都走**单端口 8791**、都需另装 **Npcap**(驱动级);⚠️ **该版 exe 在无 Npcap 的机器上 import 期就崩**(已被 v1.0.2 取代)
 - **运行期数据路径统一走 `datadir.py`**:源码运行 = 项目目录;exe 运行 = **exe 旁边**;`FLOWWATCH_DATA_DIR` 可覆盖(exe 的 history.db 就在 exe 同目录)

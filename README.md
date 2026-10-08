@@ -4,6 +4,8 @@
 ![version](https://img.shields.io/badge/version-1.0.3-blue)
 ![license](https://img.shields.io/badge/license-MIT-green)
 
+**📖 项目介绍与完整说明（飞书文档 · 公网可读）**：https://my.feishu.cn/docx/QW0hdFJ78o6z1VxdK1rcmJwbnqf
+
 **flowwatch** 是本机流量实时监控工具：按进程归因，看清这台机器上哪个进程在偷偷用带宽、在跟谁通信（域名）、从什么时候开始。基于 Python + FastAPI + SSE + SQLite + React 19，通过 Npcap 抓包并按进程归因，结合 DNS / SNI / ETW 元数据还原对端域名；只统计元数据、不落包体，MIT 开源。
 
 > 回答一个任务管理器回答不了的问题：**这台机器上，哪个进程在跟谁通信、用了多少带宽、从什么时候开始的。**
@@ -746,7 +748,7 @@ python tests/test_domain_history.py
 python tests/test_etw.py
 ```
 
-> 其余脚本需要工具在运行时使用（`python server.py` + `cd web && npm run dev`），
+> 其余脚本需要工具在运行时使用（`python server.py` + `cd web && npm install && npm run dev`），
 > 它们读的是 `/api/health`、`/api/rates` 等本机接口。ETW 的端到端验证需要管理员运行，见上文《ETW 归因》。
 
 ## Roadmap

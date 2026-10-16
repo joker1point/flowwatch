@@ -25,6 +25,14 @@ import re
 import sys
 from pathlib import Path
 
+# Windows runner / 中文控制台的 stdout 可能是 cp1252 / cp936 —— 本脚本会打印中文，
+# 不兜底会直接 UnicodeEncodeError（2026-10-16 memfuse 的 CI 实测踩过）。
+for _s in (sys.stdout, sys.stderr):
+    try:
+        _s.reconfigure(encoding="utf-8", errors="replace")
+    except Exception:
+        pass
+
 BADGE_HINT = ("shields.io", "badgen", "/badge", "badge.svg", "codecov", "coveralls",
               "github/actions/workflows", "/actions/workflows/", "travis-ci", "circleci",
               "badge.fury", "repology", "img.shields")

@@ -19,6 +19,14 @@ import subprocess
 import sys
 from pathlib import Path
 
+# Windows runner / 中文控制台的 stdout 可能是 cp1252 / cp936 —— 本脚本会打印中文，
+# 不兜底会直接 UnicodeEncodeError（2026-10-16 memfuse 的 CI 实测踩过）。
+for _s in (sys.stdout, sys.stderr):
+    try:
+        _s.reconfigure(encoding="utf-8", errors="replace")
+    except Exception:
+        pass
+
 # 品牌词（硬红线）：不区分大小写的子串匹配
 BRAND_HARD = ["flclash", "mihomo", "clash"]
 

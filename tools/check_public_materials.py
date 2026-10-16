@@ -43,10 +43,15 @@ SECRET_WARN = [
 ]
 
 SKIP_DIRS = {".git", "node_modules", "target", ".venv", "venv", "dist", "build",
-             "__pycache__", ".next", ".mypy_cache", ".pytest_cache"}
+             "__pycache__", ".next", ".mypy_cache", ".pytest_cache",
+             # vendor / 生成物目录（2026-10-16 补：techlog 的 .yarn/releases 里
+             # 压缩后的 yarn 源码含 "clash" 子串 → 误报。vendor 文件不由我们维护）
+             ".yarn", ".cache", "vendor", "third_party"}
 SKIP_EXT = {".png", ".jpg", ".jpeg", ".gif", ".webp", ".ico", ".pdf", ".zip", ".exe",
             ".dll", ".so", ".dylib", ".mp3", ".mp4", ".wav", ".woff", ".woff2", ".ttf",
             ".rlib", ".rmeta", ".o", ".a", ".db", ".sqlite", ".pyc", ".bin", ".7z", ".tar", ".gz"}
+# 压缩/产物流（同上：vendored，不按源码扫）
+SKIP_NAME_TAIL = (".min.js", ".min.css", ".min.mjs", ".map")
 
 IGNORE_MARK = "public-materials: ignore"
 SELF_NAME = "check_public_materials.py"
@@ -94,7 +99,9 @@ def scan(root: Path) -> int:
 
     n_files = 0
     for p in sorted(tracked_files(root)):
-        if p.name == SELF_NAME:
+        if p.name == SELF_NAME or p.name.endswith(SKIP_NAME_TAIL):
+            continue
+        if any(part in SKIP_DIRS for part in p.parts):
             continue
         text = read_text(p)
         if text is None:

@@ -113,7 +113,7 @@ cd web && VITE_API_BASE=/ npm run build && cd ..
 ```
 device=\Device\NPF_{4FC5DA1D-...}  端点表 6299 个（刷新 203 ms）
     PID  进程                          发送速率        接收速率   包数  主要对端
-  26692  ProxyClient.exe              2.4 MiB/s     46.8 KiB/s  12790  18.163.126.61:1443
+  26692  ProxyClient.exe              2.4 MiB/s     46.8 KiB/s  12790  18.163.x.x:1443
  121308  Marvis.exe                   4.7 KiB/s      171.7 B/s    244  224.0.0.251:5353
   27836  mCloud.exe                 1019.3 B/s      212.7 B/s     20  36.140.64.106:443
    2936  svchost.exe                  22.6 B/s       96.4 B/s     10  222.200.115.252:53
@@ -561,6 +561,25 @@ GET /api/history/domains?minutes=60&limit=20&named_only=true
 > 一句话：**抓包看得见"网线上跑了什么"，看不见"谁在使用网线"；
 > 代理场景把后者藏得最深，而它恰好是排障的第一个问题。**
 
+## 告警规则：从"事后看"到"事中拦"
+
+`scripts/proxy_sentinel.py` 是 2026-09-17 那次「单日上行 124 GB」事故的产物——但它只盯死代理进程、只有两个写死的阈值。
+现在它被泛化成了 **`alert_rules.py`（进程流量告警规则引擎）**：**任意进程 × 可组合条件 × Web 配置**。
+
+| 能力 | 说明 |
+|---|---|
+| 两类条件（可叠加） | `window_bytes` 窗口累计流量超限（如「近 60 分钟上行 > 10 GB」）；`sustained_minutes` 持续传输时长超限（如「连续忙 60 分钟不休息」）。同一规则内 `match=any`（任一命中）/ `all`（全部命中） |
+| 诚实优先 | 分钟桶缺列（采集断过）视为**断裂**——不把断线时段算成"连续传输" |
+| 告警出口 | 桌面留档文件 + Catrace「flowwatch-alert」小窗；未装/未启用时**置顶弹窗兜底**（120 秒自动关闭） |
+| 去抖 | 每条规则**独立冷却**（默认 30 分钟），冷却期内命中不重复弹 |
+| 评估节奏 | `server.py` 内起告警守护，每 5 分钟评估一轮；也可独立跑 `python alert_rules.py --check / --status / --test` |
+| 面板配置 | 面板「告警规则」：三个**一键模板**（大流量上传 / 大流量下载 / 持续传输）+ **进程点选**（近 24h 有流量的进程 chip，点击即填，免写通配符） |
+| 数据源 | 只读历史库 `buckets` 表（`bucket_ts / pid / process / out_bytes / in_bytes`） |
+
+> 首次启用会把 sentinel 的保护**等价种为默认规则**——原脚本与它的计划任务可随后退役。
+> 复现：`python alert_rules.py --status` 看各规则当前值、`--test` 弹一次测试告警验证通道；
+> `tests/test_alert_rules.py`（规则判定单测）与 `scripts/e2e_alert_rules.py`（端到端）覆盖。
+
 ## 流量助手：面板里能问的只读 Agent
 
 界面右列有个「流量助手」面板：随时问本机流量的问题（谁在占带宽、某个进程为什么异常、
@@ -753,11 +772,12 @@ python tests/test_etw.py
 
 ## Roadmap
 
-**v1.1（计划中，尚未实现）**
+**已实现（原 Roadmap 项，2026-10-16 落地）**
 
-- **告警规则可配置**：代理哨兵（`scripts/proxy_sentinel.py`）目前阈值与"盯哪个进程"都是写死的
-  （`%proxy% / %vpn%` 这类通用匹配，30 分钟 5 GB / 60 分钟 10 GB）—— 名字里不含这两类的客户端不会触发。
-  计划把阈值、窗口、进程匹配都做成配置（CLI + 配置文件）。
+- ✅ **告警规则可配置**：`scripts/proxy_sentinel.py`（写死的代理进程 + 两个固定阈值）已被
+  `alert_rules.py` 取代——任意进程 × 可组合条件 × Web 配置，见《告警规则》一节。
+
+**v1.2（计划中，尚未实现）**
 - **邮件告警通道**：现有三条出口是桌面弹窗 / Catrace 小窗 / 桌面告警文件；计划再加一条邮件
   （标准库 `smtplib`，零新依赖；凭据进 `.env`，不入库，推不到就降级回弹窗）。
 
@@ -781,13 +801,13 @@ python tests/test_etw.py
                  （需管理员；非提权时如实降级，见《ETW 归因》一节）
         │
         ▼
-API 层 server.py  ✅（127.0.0.1:8788）
+API 层 server.py  ✅（127.0.0.1:8788；存在 web/dist 时**同源挂载界面**——秒开只多一个浏览器标签）
   /api/health · /api/meta · /api/rates · /api/stream(SSE)
   /api/history/process · /api/history/top · /api/history/timeline · /api/history/domains · /api/events
   RateHub 每秒 flush 窗口 → 组帧 → 广播；NameCache 缓存 pid→进程名
         │
         ▼
-前端 web/  ✅（127.0.0.1:5273，复用 portwatch 的设计令牌与 SSE 状态机）
+前端 web/  ✅（开发 127.0.0.1:5273；成品形态走 8788 同源挂载 / 8791 单端口一键起；复用 portwatch 的设计令牌与 SSE 状态机）
   进程排行（双色条 + 相对流量）· 本机总吞吐曲线 · 选中进程的连接明细
         │
         ▼
@@ -795,6 +815,12 @@ API 层 server.py  ✅（127.0.0.1:8788）
   时间桶聚合：每分钟每进程一行（写放大 O(进程数)/分钟，与采样频率无关）
   攒批写：桶内每 10s upsert，桶切完定稿 → 派生事件（出现 / 消失 / 尖峰）
   故障隔离：独立写线程 + 有界队列（满则丢历史样本）；读接口走线程池
+        │
+        ▼
+告警层 alert_rules.py  ✅（server.py 内起守护，每 5 分钟评估一轮）
+  两类条件：window_bytes（窗口累计流量）/ sustained_minutes（持续传输时长），match=any|all
+  出口：桌面留档 + Catrace「flowwatch-alert」小窗（兜底置顶弹窗）；每规则独立冷却（默认 30 分钟）
+  Web 配置：一键模板 + 进程点选（见《告警规则》一节）
 ```
 
 > 与 portwatch 的关键差异：那里 SSE 推的是**事件增量**（前端做局部增删），这里推的是

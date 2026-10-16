@@ -1,4 +1,6 @@
 import type {
+  AlertCondition,
+  AlertRule,
   AssistantStatus,
   ChangeEvent,
   DomainTop,
@@ -275,4 +277,66 @@ export async function setAutostart(enabled: boolean): Promise<Autostart> {
   })
   if (!response.ok) throw new Error(`设置失败 HTTP ${response.status}`)
   return (await response.json()) as Autostart
+}
+
+/* 进程流量告警规则：双条件（窗口累计 / 持续时长）× 任意进程 × Web 配置 */
+
+export interface AlertRuleIn {
+  name: string
+  processes: string[]
+  enabled: boolean
+  match: 'any' | 'all'
+  conditions: AlertCondition[]
+  cooldown_minutes: number
+}
+
+export const fetchAlertRules = () =>
+  getJson<{ items: AlertRule[]; path: string; interval_sec: number }>('/api/alert-rules')
+
+export async function saveAlertRule(
+  rule: AlertRuleIn,
+  id?: string,
+): Promise<AlertRule> {
+  const response = await fetch(
+    `${API_BASE}/api/alert-rules${id ? `/${encodeURIComponent(id)}` : ''}`,
+    {
+      method: id ? 'PUT' : 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify(rule),
+    },
+  )
+  if (!response.ok) {
+    const detail = (await response.json().catch(() => null)) as { detail?: string } | null
+    throw new Error(detail?.detail ?? `保存失败 HTTP ${response.status}`)
+  }
+  return ((await response.json()) as { item: AlertRule }).item
+}
+
+export async function deleteAlertRule(id: string): Promise<void> {
+  const response = await fetch(`${API_BASE}/api/alert-rules/${encodeURIComponent(id)}`, {
+    method: 'DELETE',
+  })
+  if (!response.ok) {
+    const detail = (await response.json().catch(() => null)) as { detail?: string } | null
+    throw new Error(detail?.detail ?? `删除失败 HTTP ${response.status}`)
+  }
+}
+
+/** 测试告警：用该规则当前值弹一次（无视冷却，验证通道与阈值形态） */
+export async function testAlertRule(id: string): Promise<{ ok: boolean }> {
+  const response = await fetch(`${API_BASE}/api/alert-rules/${encodeURIComponent(id)}/test`, {
+    method: 'POST',
+  })
+  if (!response.ok) {
+    const detail = (await response.json().catch(() => null)) as { detail?: string } | null
+    throw new Error(detail?.detail ?? `测试失败 HTTP ${response.status}`)
+  }
+  return (await response.json()) as { ok: boolean }
+}
+
+/** 立即评估一轮（不等后台 5 分钟周期） */
+export async function checkAlertRules(): Promise<{ ok: boolean; alerted: number }> {
+  const response = await fetch(`${API_BASE}/api/alert-rules/check`, { method: 'POST' })
+  if (!response.ok) throw new Error(`检查失败 HTTP ${response.status}`)
+  return (await response.json()) as { ok: boolean; alerted: number }
 }

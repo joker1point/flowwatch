@@ -44,10 +44,16 @@ class _Proc:
 
 
 class LocalConnTable:
-    """周期性快照系统 TCP 连接表并聚合。刷新线程写、API 线程读，用锁隔开。"""
+    """周期性快照系统 TCP 连接表并聚合。刷新线程写、API 线程读，用锁隔开。
 
-    def __init__(self, interval: float = DEFAULT_INTERVAL) -> None:
+    `on_refresh`（可选）：每次成功刷新后把「按进程的连接数」喂给 sink（server 接的是
+    history.submit_conns → 落 conn_buckets 时间桶）。sink 只允许做非阻塞投递；
+    它抛异常/卡住都不能影响采集——历史是增强功能，不是采集的前提。
+    """
+
+    def __init__(self, interval: float = DEFAULT_INTERVAL, on_refresh=None) -> None:
         self.refresh_interval = interval
+        self.on_refresh = on_refresh
         self.source = "init"
         self.error = ""
         self.last_cost_ms = 0.0
@@ -139,6 +145,21 @@ class LocalConnTable:
             self.local_conns = local_total
             self.updated_at = now
             self.last_cost_ms = (time.monotonic() - t0) * 1000
+
+        # 锁外喂 sink（连接数快照落库）；明确吞异常：采集绝不为历史让路
+        sink = getattr(self, "on_refresh", None)
+        if sink is not None:
+            try:
+                sink([
+                    {"pid": pid, "process": names.get(pid, ""),
+                     "conns": item.conns, "local_conns": item.local_conns,
+                     "new_per_sec": round(new_per_sec.get(pid, 0.0), 2),
+                     # 连的本机端口（Top 3）——"谁在连代理/本地服务"的核心信息，落库供取证引用
+                     "peers": dict(item.peers.most_common(3))}
+                    for pid, item in procs.items()
+                ])
+            except Exception:
+                logger.debug("on_refresh sink 调用失败（已忽略）", exc_info=True)
 
     @staticmethod
     def _local_addresses() -> set[str]:

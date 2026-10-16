@@ -1,5 +1,6 @@
 import { useCallback, useEffect, useMemo, useState } from 'react'
 import { fetchEvents, fetchHealth, fetchProcessHistory, fetchTopDomains } from './api'
+import { AlertRulesPanel } from './components/AlertRulesPanel'
 import { AssistantPanel } from './components/AssistantPanel'
 import { CaptureGuide } from './components/CaptureGuide'
 import { ConnDetail } from './components/ConnDetail'
@@ -29,7 +30,7 @@ export default function App() {
   const [processHistory, setProcessHistory] = useState<ProcessHistory | null>(null)
   const [historyLoading, setHistoryLoading] = useState(false)
   const [view, setView] = useState<'process' | 'domain'>('process')
-  const [page, setPage] = useState<'live' | 'history' | 'notes'>('live')
+  const [page, setPage] = useState<'live' | 'history' | 'notes' | 'alerts'>('live')
   const [hourTopDomains, setHourTopDomains] = useState<DomainTop[]>([])
 
   // 近 1 小时的域名排行（历史库）：与实时域名列表互补 —— 一个看"此刻"，一个看"这一小时"
@@ -182,12 +183,23 @@ export default function App() {
         >
           笔记
         </button>
+        <button
+          type="button"
+          role="tab"
+          aria-selected={page === 'alerts'}
+          className={page === 'alerts' ? 'is-active' : ''}
+          onClick={() => setPage('alerts')}
+        >
+          告警
+        </button>
       </nav>
 
       {page === 'history' ? (
         <HistoryView health={health} />
       ) : page === 'notes' ? (
         <NotesPanel />
+      ) : page === 'alerts' ? (
+        <AlertRulesPanel />
       ) : (
         <>
       <div className="toolbar">

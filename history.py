@@ -22,6 +22,7 @@
 
 from __future__ import annotations
 
+import json
 import queue
 import sqlite3
 import threading
@@ -104,6 +105,11 @@ class HistoryStore:
         self._domain_acc: dict[tuple[str, str], list[int]] = {}   # 当前桶：(域名, 来源) → [out, in, conns]
         self._bucket_ts: int = 0
         self._last_write = 0.0
+        # 连接数桶（本地连接视角，来源 localconn 的快照回调）：
+        # 连接数是瞬时量 —— 桶内取**峰值**（"这一分钟最多同时有多少连接"）而不是平均。
+        self._conn_acc: dict[int, list] = {}          # 当前桶：pid → [conns_peak, local_peak, new_peak, name]
+        self._conn_bucket_ts: int = 0
+        self._last_conn_write = 0.0
         self._recent: dict[int, deque[tuple[int, int]]] = {}   # pid → 近若干桶的 (ts, 总字节)
         self._last_active: dict[int, tuple[int, str]] = {}     # pid → (最后活跃桶, 进程名)
         self._vanish_reported: set[int] = set()
@@ -150,12 +156,29 @@ class HistoryStore:
             );
             CREATE INDEX IF NOT EXISTS idx_domains_name ON domains(name, bucket_ts);
 
+            CREATE TABLE IF NOT EXISTS conn_buckets (
+              bucket_ts        INTEGER NOT NULL,
+              pid              INTEGER NOT NULL,
+              process          TEXT    NOT NULL,
+              conns_peak       INTEGER NOT NULL DEFAULT 0,   -- 桶内活动连接数峰值
+              local_conns_peak INTEGER NOT NULL DEFAULT 0,   -- 桶内"指向本机"连接数峰值
+              new_per_sec_peak REAL    NOT NULL DEFAULT 0,   -- 桶内新建本机侧端点速率峰值
+              peers            TEXT    NOT NULL DEFAULT '',   -- 峰值时刻的连接本机端口 Top3（JSON）
+              PRIMARY KEY (bucket_ts, pid)
+            );
+            CREATE INDEX IF NOT EXISTS idx_conn_buckets_pid ON conn_buckets(pid, bucket_ts);
+
             CREATE TABLE IF NOT EXISTS meta (
               key   TEXT PRIMARY KEY,
               value TEXT NOT NULL
             );
             """
         )
+        # 迁移（幂等）：conn_buckets 的首版没有 peers 列；已存在时 ALTER 报 OperationalError
+        try:
+            conn.execute("ALTER TABLE conn_buckets ADD COLUMN peers TEXT NOT NULL DEFAULT ''")
+        except sqlite3.OperationalError:
+            pass
         conn.execute(
             "INSERT INTO meta(key, value) VALUES('schema', ?) ON CONFLICT(key) DO UPDATE SET value=excluded.value",
             (SCHEMA,),
@@ -246,6 +269,21 @@ class HistoryStore:
         except queue.Full:
             self.dropped += 1
 
+    def submit_conns(self, rows: list[dict[str, Any]]) -> None:
+        """投递一份「按进程的连接数快照」（localconn 刷新回调的产物）。非阻塞、同样丢历史不卡采集。
+
+        与 submit 共用一条队列：消息用 `__kind` 区分（速率窗口没有这个键，天然兼容）。
+        """
+        if not self.enabled or not rows:
+            return
+        if self._queue is None:
+            self.append_conns(rows)      # 没起写线程时退化成同步（单测/脚本场景）
+            return
+        try:
+            self._queue.put_nowait({"__kind": "conns", "rows": rows})
+        except queue.Full:
+            self.dropped += 1
+
     def _writer_loop(self) -> None:
         while True:
             try:
@@ -257,7 +295,10 @@ class HistoryStore:
             if window is None:
                 return
             try:
-                self.append(window)
+                if isinstance(window, dict) and window.get("__kind") == "conns":
+                    self.append_conns(window.get("rows") or [])
+                else:
+                    self.append(window)
             except Exception as exc:      # 历史写入失败只记账，不影响采集与实时接口
                 self.errors += 1
                 self.last_error = f"{type(exc).__name__}: {exc}"
@@ -279,6 +320,7 @@ class HistoryStore:
             return
         try:
             self._commit(finalize=True)      # 退出时把在跑的桶定稿，别丢最后不到一分钟
+            self._commit_conns()
         finally:
             self._conn.close()
             self._conn = None
@@ -291,6 +333,7 @@ class HistoryStore:
         if bucket != self._bucket_ts:
             if self._bucket_ts:              # 上一个桶到此结束：定稿（派生事件 + 清理）
                 self._commit(finalize=True)
+                self._commit_conns()         # 连接桶与字节桶同边界结账
             self._bucket_ts = bucket
             self._acc = {}
             self._acc_sentinel = {}
@@ -452,6 +495,71 @@ class HistoryStore:
         self._write_many("INSERT INTO events(ts, kind, pid, process, detail) VALUES(?, ?, ?, ?, ?)", fresh)
         self.events_written += len(fresh)
 
+    def append_conns(self, rows: list[dict[str, Any]]) -> bool:
+        """把一份连接快照并进当前「连接桶」——瞬时量取**峰值**（不是求平均也不是求和）。"""
+        stamp = time.time()
+        bucket = int(stamp // self.bucket_seconds) * self.bucket_seconds
+        if bucket != self._conn_bucket_ts:
+            if self._conn_bucket_ts:
+                self._commit_conns()
+            self._conn_bucket_ts = bucket
+            self._conn_acc = {}
+        for row in rows:
+            try:
+                pid = int(row.get("pid"))           # type: ignore[arg-type]
+            except (TypeError, ValueError):
+                continue
+            if pid <= 0:                            # 与字节层口径一致：哨兵/非法 pid 不进连接桶
+                continue
+            slot = self._conn_acc.get(pid)
+            if slot is None:
+                slot = self._conn_acc[pid] = [0, 0, 0.0, "", ""]
+            name = str(row.get("process") or "")
+            if name:
+                slot[3] = name
+            conns = int(row.get("conns") or 0)
+            peers = row.get("peers") or {}
+            # peers 与峰值对齐：只在连接数刷新峰值（含并列）时更新，代表"峰值那一刻在连谁"
+            if conns >= slot[0] and peers:
+                try:
+                    slot[4] = json.dumps(peers, ensure_ascii=False)
+                except (TypeError, ValueError):
+                    pass
+            slot[0] = max(slot[0], conns)
+            slot[1] = max(slot[1], int(row.get("local_conns") or 0))
+            slot[2] = max(slot[2], float(row.get("new_per_sec") or 0.0))
+        if stamp - self._last_conn_write >= self.flush_interval:
+            self._commit_conns()
+            return True
+        return False
+
+    def _commit_conns(self) -> None:
+        if self._conn is None or not self._conn_bucket_ts or not self._conn_acc:
+            self._last_conn_write = time.time()
+            return
+        rows = [
+            (self._conn_bucket_ts, pid, slot[3] or self._name(pid), slot[0], slot[1], slot[2],
+             slot[4] if len(slot) > 4 else "")
+            for pid, slot in self._conn_acc.items()
+        ]
+        try:
+            self._write_many(
+                """INSERT INTO conn_buckets(bucket_ts, pid, process, conns_peak, local_conns_peak,
+                                           new_per_sec_peak, peers)
+                   VALUES(?, ?, ?, ?, ?, ?, ?)
+                   ON CONFLICT(bucket_ts, pid) DO UPDATE SET
+                     conns_peak       = excluded.conns_peak,
+                     local_conns_peak = excluded.local_conns_peak,
+                     new_per_sec_peak = excluded.new_per_sec_peak,
+                     peers            = excluded.peers,
+                     process          = excluded.process""",
+                rows,
+            )
+        except Exception as exc:      # 连接桶写入失败只记账，与字节桶同待遇
+            self.errors += 1
+            self.last_error = f"{type(exc).__name__}: {exc}"
+        self._last_conn_write = time.time()
+
     def _prune(self) -> None:
         if self._conn is None:
             return
@@ -460,6 +568,7 @@ class HistoryStore:
         event_cutoff = int(wall - self.event_retention_days * 86400)
         self._execute("DELETE FROM buckets WHERE bucket_ts < ?", (bucket_cutoff,))
         self._execute("DELETE FROM domains WHERE bucket_ts < ?", (bucket_cutoff,))
+        self._execute("DELETE FROM conn_buckets WHERE bucket_ts < ?", (bucket_cutoff,))
         self._execute("DELETE FROM events WHERE ts < ?", (event_cutoff,))
 
     # ---------------------------------------------------------------- 查询

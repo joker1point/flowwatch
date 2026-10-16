@@ -1,7 +1,13 @@
 #!/usr/bin/env python3
 """代理流量异常哨兵 —— 用 flowwatch 历史库盯住代理进程的上行流量。
 
-背景：2026-09-17 单日 FlClash 上行 124 GB（Hysteria2 重传风暴），
+⚠️ **已退役（2026-10-15）**：本脚本的判定已泛化为 `alert_rules.py` 规则引擎
+（任意进程 × 双条件 × Web 配置），等价保护作为默认规则自动种入；
+计划任务 `ProxySentinel` 同日注销（避免与规则引擎双通道重复告警）。
+保留本文件仅作历史资产——新场景请用告警面板配置规则，不要再依赖此脚本。
+以下为原始说明。
+
+背景：2026-09-17 单日某代理进程上行 124 GB 的重传风暴，
 6 小时后才被发现。本脚本让同类事件在 30 分钟内就能被看见。
 
 判定（基于代理进程的时间桶数据，两个条件任一命中即告警）：
@@ -34,8 +40,8 @@ ROOT = Path(__file__).resolve().parent.parent          # flowwatch/
 DB = ROOT / "history.db"
 STATE = ROOT / "_run" / "sentinel_state.json"
 
-# 代理内核进程名（mihomo 系：FlClash / Clash Verge / 原版；SQLite LIKE 对 ASCII 不区分大小写）
-PROXY_LIKE = ("%flclash%", "%mihomo%", "%clash%")
+# 代理内核进程名匹配（示例占位：按你所用的代理客户端自行填写；SQLite LIKE 对 ASCII 不区分大小写）
+PROXY_LIKE = ("%proxy%", "%vpn%")
 
 W_MIN, W_WARN, W_ALERT = 600, 1800, 3600               # 10 / 30 / 60 分钟窗
 LIMIT_ALERT_GB = 10.0                                  # 60 分钟上行阈值
@@ -200,7 +206,7 @@ def check(verbose: bool = True) -> int:
     alert("⚠️ 代理流量异常",
           f"{reason}\n\n{fmt(u)}\n\n"
           f"2026-09-17 曾以同样形态单日打出 124 GB（hy2 重传风暴）。\n"
-          f"建议立即打开 FlClash：切换节点或断开代理。\n"
+          f"建议打开你的代理客户端：切换节点或断开代理。\n"
           f"如果你正在主动上传大文件，可忽略本提醒。")
     print(f"** 已告警：{reason}")
     return 1

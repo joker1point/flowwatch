@@ -264,3 +264,56 @@ export interface ChangeEvent {
   process: string
   detail: string
 }
+
+/* ── 进程流量告警规则（/api/alert-rules） ────────────────────────────── */
+
+export type AlertConditionType = 'window_bytes' | 'sustained_minutes'
+export type AlertDirection = 'out' | 'in' | 'total'
+
+export interface AlertCondition {
+  type: AlertConditionType
+  /** window_bytes：考察窗口（分钟）与阈值（字节） */
+  window_minutes?: number
+  bytes?: number
+  direction?: AlertDirection
+  /** sustained_minutes：持续传输时长阈值（分钟） */
+  minutes?: number
+}
+
+/** 条件当前状态：current 的语义随类型（字节数 / 连续分钟数） */
+export interface AlertConditionStatus {
+  type: AlertConditionType | string
+  hit: boolean
+  window_minutes?: number
+  direction?: AlertDirection
+  threshold?: number
+  current?: number
+  minutes?: number
+  active?: boolean
+  error?: string
+}
+
+export interface AlertRuleStatus {
+  conditions: AlertConditionStatus[]
+  hit: boolean
+  matched: number
+  cooling: boolean
+  cooldown_left_min: number
+  last_alert_ts: number | null
+  error?: string
+}
+
+export interface AlertRule {
+  id: string
+  name: string
+  /** 进程匹配串（LIKE 语法，大小写不敏感），可多个 */
+  processes: string[]
+  enabled: boolean
+  match: 'any' | 'all'
+  conditions: AlertCondition[]
+  cooldown_minutes: number
+  created_ts?: number
+  last_alert_ts?: number
+  note?: string
+  status: AlertRuleStatus
+}

@@ -1047,3 +1047,149 @@ body {
   line-height: 1.75;
   color: var(--text-secondary);
 }
+
+/* ── 告警规则面板（「告警」页） ─────────────────────────────────────────
+   进程流量告警规则：任意进程 × 双条件（窗口累计 / 持续时长）× Web 配置 */
+.ar { display: flex; flex-direction: column; gap: var(--s-4); }
+
+.ar__bar { display: flex; flex-wrap: wrap; align-items: flex-start; gap: var(--s-3); }
+.ar__intro { display: flex; flex-direction: column; gap: 2px; }
+.ar__meta { color: var(--text-muted); font-size: 11px; }
+.ar__actions { display: flex; gap: var(--s-2); margin-left: auto; }
+
+.ar__btn {
+  padding: 5px var(--s-3);
+  border: 1px solid var(--hairline);
+  border-radius: var(--radius-sm);
+  background: var(--bg-panel);
+  color: var(--text-secondary);
+  font: inherit;
+  font-size: 12px;
+  cursor: pointer;
+  transition: background var(--dur-fast) var(--ease-out-quart), color var(--dur-fast) var(--ease-out-quart);
+}
+.ar__btn:hover { color: var(--text-primary); border-color: var(--accent); }
+.ar__btn:disabled { opacity: 0.5; cursor: not-allowed; }
+.ar__btn--primary { border-color: var(--accent); color: var(--accent); background: var(--accent-soft); }
+.ar__btn--sm { padding: 3px var(--s-2); font-size: 11px; }
+.ar__btn--danger:hover { border-color: var(--danger); color: var(--danger); }
+
+/* 编辑表单 */
+.ar__form {
+  display: flex;
+  flex-direction: column;
+  gap: var(--s-3);
+  padding: var(--s-4);
+  border: 1px solid var(--hairline);
+  border-radius: var(--radius-md);
+  background: var(--bg-panel);
+}
+.ar__form h3 { margin: 0; font-size: 13px; }
+.ar__field { display: flex; flex-direction: column; gap: var(--s-1); font-size: 12px; color: var(--text-secondary); }
+.ar__field input[type='text'], .ar__field input[type='number'], .ar__field select {
+  padding: 5px var(--s-2);
+  border: 1px solid var(--hairline);
+  border-radius: var(--radius-sm);
+  background: var(--bg-base);
+  color: var(--text-primary);
+  font: inherit;
+  font-size: 12px;
+}
+.ar__field-row { display: flex; flex-wrap: wrap; align-items: flex-end; gap: var(--s-3); }
+.ar__field--num input { width: 90px; }
+.ar__field--check { flex-direction: row; align-items: center; gap: var(--s-2); }
+
+.ar__conds { display: flex; flex-direction: column; gap: var(--s-2); }
+.ar__conds-head { display: flex; align-items: center; justify-content: space-between; font-size: 12px; color: var(--text-secondary); }
+.ar__conds-add { display: flex; gap: var(--s-2); }
+
+/* 降门槛三件套（2026-10-16）：模板行 + 进程点选 */
+.ar__templates { display: flex; flex-wrap: wrap; align-items: center; gap: var(--s-2); }
+.ar__templates-label { color: var(--text-muted); font-size: 11px; }
+.ar__proc-pick { display: flex; flex-direction: column; gap: var(--s-1); }
+.ar__proc-pick-label { color: var(--text-muted); font-size: 11px; }
+.ar__proc-pick-list { display: flex; flex-wrap: wrap; gap: var(--s-1); }
+.ar__cond-edit {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: var(--s-2);
+  padding: var(--s-2) var(--s-3);
+  border: 1px dashed var(--hairline);
+  border-radius: var(--radius-sm);
+  font-size: 12px;
+  color: var(--text-secondary);
+}
+.ar__cond-edit select, .ar__cond-edit input {
+  padding: 3px var(--s-2);
+  border: 1px solid var(--hairline);
+  border-radius: var(--radius-sm);
+  background: var(--bg-base);
+  color: var(--text-primary);
+  font: inherit;
+  font-size: 12px;
+}
+.ar__num { width: 80px; }
+.ar__form-actions { display: flex; gap: var(--s-2); }
+
+/* 规则卡片 */
+.ar__list { display: flex; flex-direction: column; gap: var(--s-3); }
+.ar__empty { padding: var(--s-6); text-align: center; color: var(--text-muted); font-size: 12px; }
+
+.ar__card {
+  display: flex;
+  flex-direction: column;
+  gap: var(--s-2);
+  padding: var(--s-3) var(--s-4);
+  border: 1px solid var(--hairline);
+  border-radius: var(--radius-md);
+  background: var(--bg-panel);
+}
+.ar__card--off { opacity: 0.55; }
+.ar__card-head { display: flex; flex-wrap: wrap; align-items: center; gap: var(--s-2); }
+.ar__card-name { font-size: 13px; }
+.ar__card-actions { display: flex; gap: var(--s-2); margin-left: auto; }
+.ar__switch { display: inline-flex; cursor: pointer; }
+
+.ar__badge {
+  padding: 1px var(--s-2);
+  border-radius: 999px;
+  font-size: 10px;
+  color: var(--text-muted);
+  border: 1px solid var(--hairline);
+}
+.ar__badge--all { color: var(--accent); border-color: var(--accent); }
+.ar__badge--err { color: var(--danger); border-color: var(--danger); }
+
+.ar__procs { display: flex; flex-wrap: wrap; gap: var(--s-1); }
+.ar__proc {
+  padding: 1px var(--s-2);
+  border-radius: var(--radius-sm);
+  background: var(--bg-base);
+  border: 1px solid var(--hairline);
+  color: var(--text-secondary);
+  font-family: var(--font-mono);
+  font-size: 11px;
+}
+
+.ar__cond-list { display: flex; flex-direction: column; gap: 2px; margin: 0; padding: 0; list-style: none; }
+.ar__cond { display: flex; align-items: baseline; gap: var(--s-2); font-size: 12px; color: var(--text-secondary); }
+.ar__cond--hit { color: var(--warn); }
+.ar__cond-mark { flex: 0 0 auto; }
+.ar__cond-label { font-family: var(--font-mono); font-size: 11px; }
+.ar__cond-current { margin-left: auto; color: var(--text-muted); font-size: 11px; }
+.ar__cond--hit .ar__cond-current { color: var(--warn); }
+
+.ar__card-foot {
+  display: flex;
+  flex-wrap: wrap;
+  gap: var(--s-3);
+  padding-top: var(--s-2);
+  border-top: 1px solid var(--hairline);
+  color: var(--text-muted);
+  font-size: 11px;
+}
+.ar__note { color: var(--text-muted); font-style: italic; }
+
+.ar__foot { color: var(--text-muted); font-size: 11px; }
+.ar__foot code { font-family: var(--font-mono); font-size: 10px; }

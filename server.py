@@ -45,8 +45,14 @@ import datadir
 import history
 import localconn
 import notes
+import alert_rules
 
 logger = logging.getLogger("flowwatch.server")
+
+# 日志配置必须在**模块级**（而不是 main() 里）：run.py 走 import server + 自起 uvicorn，
+# 不经过 main()——放在 main 里会让单端口交付形态丢掉全部 flowwatch.* 的 INFO 日志
+# （采集/历史/告警守护的死因全部不可考，E-24 同款）。uvicorn 自己的日志不受影响。
+logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(name)s: %(message)s")
 
 VERSION = "1.0.3"           # 对外版本（/api/meta 暴露；发版时与 git tag 一起改）
 HOST = "127.0.0.1"
@@ -251,14 +257,18 @@ async def lifespan(app: FastAPI):
         await asyncio.to_thread(store.open)          # 建表/PRAGMA 是阻塞 IO，别占事件循环
         store.set_name_resolver(hub.names.name)      # 进程名冗余落库：pid 会被复用
         store.start_writer()                         # 写库搬到独立线程：实时链路零等待
+        # 本机连接数也进时间桶（patrol 的「连接视角」信号源；抓包看不见代理代收时的发起方）
+        hub.localconn.on_refresh = store.submit_conns
         logger.info("历史层已开启: %s（桶 %ds，保留 %g 天）",
                     store.path, store.bucket_seconds, store.retention_days)
     hub.localconn.start()                            # 独立线程：不依赖抓包，随时可用
+    alert_rules.start_watchdog()                     # 告警规则评估守护（daemon 线程）
     starter = asyncio.create_task(_start_capturer(), name="flowwatch-start")
     ticker = asyncio.create_task(hub.run(), name="flowwatch-ticker")
     try:
         yield
     finally:
+        alert_rules.stop_watchdog()
         hub.localconn.stop()
         for task in (ticker, starter):
             task.cancel()
@@ -283,6 +293,11 @@ app.include_router(assistant.router)
 # 笔记区（用户笔记 + AI 每日流量笔记）：注入只读历史库
 notes.configure(store=store)
 app.include_router(notes.router)
+
+# 进程流量告警规则（proxy_sentinel 的泛化：任意进程 × 双条件 × Web 配置）：
+# 注入 history.db 路径 + 起后台评估守护（每 5 分钟一轮，命中且过冷却即告警）
+alert_rules.configure(db_path=HISTORY_DB)
+app.include_router(alert_rules.router)
 
 
 def sse(event: str, payload: Any) -> str:
@@ -493,9 +508,20 @@ def main(argv: list[str] | None = None) -> int:
     store.retention_days = args.retention_days
     store.enabled = not args.no_history
 
+    # 单端口便利（2026-10-16）：web/dist 存在就顺手挂上——界面与 API 同源。
+    # 「默认构建（VITE_API_BASE=/）」与「开发构建（前端指向 127.0.0.1:8788）」在这里都对：
+    # 两种前端在 8788 上请求的都是同源 /api。挂载在所有 /api 路由之后，不会盖住 API。
+    # 本机用法：resident 常驻采集（8788）之后，浏览器直接开 http://127.0.0.1:8788/。
+    dist = Path(__file__).resolve().parent / "web" / "dist"
+    if (dist / "index.html").exists():
+        if not any(getattr(r, "name", None) == "ui" for r in app.routes):
+            from fastapi.staticfiles import StaticFiles
+
+            app.mount("/", StaticFiles(directory=str(dist), html=True), name="ui")
+        print(f"[flowwatch] web/dist 已挂载：浏览器可开 http://127.0.0.1:{PORT}/", flush=True)
+
     import uvicorn
 
-    logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(name)s: %(message)s")
     uvicorn.run(app, host=HOST, port=PORT, log_level="info")
     return 0
 

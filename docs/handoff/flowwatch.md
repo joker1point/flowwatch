@@ -14,6 +14,8 @@
 ```powershell
 cd %USERPROFILE%\Documents\trae_projects\frontend-works\flowwatch
 python server.py --dev 4FC5DA1D        # 采集设备:GUID 片段(对应 \Device\NPF_{4FC5DA1D-...},描述"Microsoft")
+# ⚠️ 手动重启时建议带日志落盘(否则崩溃后死因不可考,2026-09-30 踩过):
+#   cmd /c "python server.py --dev 4FC5DA1D >> _run\server.out.log 2>&1"
 cd web; npm run build; npx vite preview --port 4173   # 前端(构建后静态生效)
 
 # 只想看数据(单端口:界面 + API 同源)→ http://127.0.0.1:8791
@@ -30,6 +32,7 @@ python run.py                          # 等价于双击 start.cmd(一键包入�
 - **不要用 `--dev WLAN`**:这台机器没有叫 WLAN 的抓包设备,会采集 degraded(09-19 发生过)
 - **重启前先查原参数**:`_run/` 目录历史日志的"设备:"行就是权威参数(全都是 `{4FC5DA1D}`)
 - 端口别混:**8788** 后端 ｜ **5273** dev server(HMR) ｜ **4173** vite preview(改源码需重 build) ｜ **8791** 演示包
+- ⚠️ **构建前端前确保环境无 `VITE_API_BASE`**(它会把 API 基址覆写为同源 → 在 4173 上全 404、整页「连接中断」;正确默认 = `http://127.0.0.1:8788`)。**构建后自查**:`dist/assets/*.js` 里应含 `127.0.0.1:8788`(09-25 踩过:构建时临时变量残留害整页空白;诊断口诀:页面全空先查 dist 里的 API 基址)
 - 演示包 `_deploy/flowwatch/deploy_server.py` 与开发版**同一份后端代码**(唯一复制物 = `web/dist`);**判断采集真活只看 `packets` 是否增长**;health **无 `watchdog` 字段 = 跑了旧代码**(重启即修复)
 
 ## 2. 模型配置(为开源用户,09-19 上线)

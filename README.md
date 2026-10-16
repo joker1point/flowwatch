@@ -113,7 +113,7 @@ cd web && VITE_API_BASE=/ npm run build && cd ..
 ```
 device=\Device\NPF_{4FC5DA1D-...}  端点表 6299 个（刷新 203 ms）
     PID  进程                          发送速率        接收速率   包数  主要对端
-  26692  FlClashCore.exe              2.4 MiB/s     46.8 KiB/s  12790  18.163.126.61:1443
+  26692  ProxyClient.exe              2.4 MiB/s     46.8 KiB/s  12790  18.163.126.61:1443
  121308  Marvis.exe                   4.7 KiB/s      171.7 B/s    244  224.0.0.251:5353
   27836  mCloud.exe                 1019.3 B/s      212.7 B/s     20  36.140.64.106:443
    2936  svchost.exe                  22.6 B/s       96.4 B/s     10  222.200.115.252:53
@@ -756,7 +756,7 @@ python tests/test_etw.py
 **v1.1（计划中，尚未实现）**
 
 - **告警规则可配置**：代理哨兵（`scripts/proxy_sentinel.py`）目前阈值与"盯哪个进程"都是写死的
-  （`%flclash% / %mihomo% / %clash%`，30 分钟 5 GB / 60 分钟 10 GB）—— 换成别的代理就不会触发。
+  （`%proxy% / %vpn%` 这类通用匹配，30 分钟 5 GB / 60 分钟 10 GB）—— 名字里不含这两类的客户端不会触发。
   计划把阈值、窗口、进程匹配都做成配置（CLI + 配置文件）。
 - **邮件告警通道**：现有三条出口是桌面弹窗 / Catrace 小窗 / 桌面告警文件；计划再加一条邮件
   （标准库 `smtplib`，零新依赖；凭据进 `.env`，不入库，推不到就降级回弹窗）。

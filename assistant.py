@@ -1166,7 +1166,7 @@ def load_config() -> ProviderConfig:
 def _opener() -> urllib.request.OpenerDirector:
     """代理策略：**默认直连**。
 
-    踩过的坑：本机全局设了 http_proxy / https_proxy = 127.0.0.1:7890（Clash 之类），
+    踩过的坑：本机全局设了 http_proxy / https_proxy = 127.0.0.1:7890（代理软件监听），
     代理没开时 urllib 会照着环境变量去连它 —— 连国内 API（如 dashscope）也会被挡下，
     报出来的还是 127.0.0.1 连接失败，很容易误判成"服务挂了"。
     需要走代理访问 OpenAI 的场景，显式配置：

@@ -132,3 +132,22 @@ jobs:
           name: web-dist
           path: web/dist
           retention-days: 7
+
+  # 文档与对外材料闸门（2026-10-16 起，push 必跑）：
+  #   · README 素材规范（数量按功能点数、形式按复杂度；脚本与桌面《开源项目标准》同源）
+  #   · 对外材料红线（代理软件品牌词 + 高置信凭据；公开仓一次都不能出现）
+  docs-lint:
+    name: 文档 · README 素材 + 对外材料红线
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.13"
+
+      - name: README 素材规范
+        run: python tools/check_readme_shots.py .
+
+      - name: 对外材料红线（品牌词 / 凭据）
+        run: python tools/check_public_materials.py

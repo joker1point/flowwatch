@@ -576,7 +576,7 @@ GET /api/history/domains?minutes=60&limit=20&named_only=true
 | 面板配置 | 面板「告警规则」：三个**一键模板**（大流量上传 / 大流量下载 / 持续传输）+ **进程点选**（近 24h 有流量的进程 chip，点击即填，免写通配符） |
 | 数据源 | 只读历史库 `buckets` 表（`bucket_ts / pid / process / out_bytes / in_bytes`） |
 
-> 首次启用会把 sentinel 的保护**等价种为默认规则**——原脚本与它的计划任务可随后退役。
+> 首次启用会种入两条默认规则（**全机大流量上行兜底** + 持续传输提醒，均不点名任何软件）——sentinel 已退役，其计划任务已注销。
 > 复现：`python alert_rules.py --status` 看各规则当前值、`--test` 弹一次测试告警验证通道；
 > `tests/test_alert_rules.py`（规则判定单测）与 `scripts/e2e_alert_rules.py`（端到端）覆盖。
 

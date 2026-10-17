@@ -1,7 +1,7 @@
 # flowwatch 交接文档（独立自包含)
 
 > 本文件只涉及 **flowwatch**。升级/排查 flowwatch 时**只需加载本文件**。
-> 开源仓库:github.com/joker1point/flowwatch ｜ 本机路径:`frontend-works/flowwatch` ｜ 最近更新:2026-10-16(**告警规则引擎 + 单端口界面已进仓**:提交 `927c406`/`c51decd`;本机日常入口改 8788 直出界面(§1/§8);v1.0.3 仍是最近发布版)。
+> 开源仓库:github.com/joker1point/flowwatch ｜ 本机路径:`frontend-works/flowwatch` ｜ 最近更新:2026-10-16(**告警规则引擎 + 单端口界面已进仓**:提交 `927c406`/`c51decd`;本机日常入口改 8788 直出界面(§1;决策记录见 `docs/DECISIONS.md`);v1.0.3 仍是最近发布版)。
 >
 > **本文件位置(2026-09-23 变更)**:原在 `frontend-works/docs/handoff/flowwatch.md`(工作区,**未纳版本管理**),
 > 现搬进仓库本体 = **`flowwatch/docs/handoff/flowwatch.md`**(随仓库版本管理);工作区那份已删除。
@@ -52,7 +52,7 @@ python run.py                          # 等价于双击 start.cmd(一键包入�
 
 > **2026-10-16 更新**:`proxy_sentinel.py` 已退役(保留为历史资产,计划任务 `ProxySentinel` 已注销);
 > 等价保护 + Web 配置由**告警规则引擎**接管(`alert_rules.py` + 面板「告警」页:任意进程 × 双条件 × 多规则,
-> 每 5 分钟评估;种子规则与设计取舍见 §8.2)。下方 **Catrace 集成链路(告警出口)仍然有效**,
+> 每 5 分钟评估;种子规则与设计取舍见 `docs/DECISIONS.md` 2026-10-16 节)。下方 **Catrace 集成链路(告警出口)仍然有效**,
 > alert_rules 与哨兵同源复用该出口。
 
 **链路**:
@@ -139,58 +139,3 @@ proxy_sentinel 告警 → POST http://127.0.0.1:<port>/alert → Catrace 插件 
   - **第十轮(09-23,无 Npcap 的机器上"页面打不开"——真实用户反馈驱动的修复)**:朋友的机器没装 Npcap,双击 exe 后浏览器死活打不开。**根因**:`run.py` 先打印"在此之前界面能打开,但不会有流量数据",紧接着 `import server` 就在**模块级**构造 `capturer = collector.Capturer()`,而 `Capturer.__init__` 里 `self.pcap = Pcap()` 立刻加载 wpcap.dll → 抛 `PcapError` → 进程退出,uvicorn 从未启动(崩溃栈 `run.py:125 → server.py:225 → collector.py:740 → collector.py:98`)。**复现手法(可复用)**:给 exe 目录放一个**坏的 `wpcap.dll`**(内容 `b"MZ"+b"\x00"*200`)—— 加载器优先命中应用目录,等价于"这台机器没装 Npcap",在真 exe 上复现出了完整崩溃栈。**修复**:`Capturer` 改**懒加载**(`self._pcap=None` + `pcap` property,首次真要抓包时才 `Pcap()`),异常因此落到 `_start_capturer()` 的既有兜底里 → 界面照开、`/api/health` 报 `degraded` 且 `error` 写明去装 Npcap。**配套**:① 新增 `tests/test_no_npcap.py`(子进程挂 sitecustomize 把 `ctypes.WinDLL("wpcap.dll")` 变成 OSError;断言"进程活着 / health 200 degraded / error 提到 Npcap / `/` 返回 HTML")——**先跑出红**(复现同一崩溃栈)再修,修后 7/7 绿;② `ci.yml` 两个 job + `release.yml` 发布前把关都加了这一步;③ 前端:`Header` 在 `health.error` 时显示「未启用采集」(不再永远停在"正在挑选网卡…"),`App.tsx` 加一条横幅说明原因与动作(复用既有的 `.banner`)。**回归**:7 个单测全绿(新增第 7 个)、`tsc` 过、`scripted 30/30`、变异测试仍敏感、正常路径(有 Npcap)实测照旧真采集(8s +325 包)。**⚠️ 当时未发的部分(已由 v1.0.2 / 第十一轮解决)**:v1.0.1 的 exe **仍带这个 bug**(已发布,改不了),朋友可先装 Npcap;修复要等 **v1.0.2**(打 tag → release.yml 会先跑这条新测试再发)。**未做**:虚拟机验证(本机有 VMware Workstation 但没有 Windows ISO;真 exe 上的坏 DLL 复现已是等价证据),本地重打 exe 验证冻结环境的想法没执行。
   - **第十一轮(09-23,v1.0.2 发版:先被自己的发布闸门挡下,修好再发出去)**:打 tag 后 **ci.yml 三个 job + release.yml 的发布前置全红**,release 的两个打包 job 全 skipped(没产出任何资产 → tag 可安全重建)。**根因不在业务代码,而在上一轮新加的那条测试自己**:`tests/test_no_npcap.py` 的启动参数是照 `run.py` 写死的(`--no-browser`),而它会**按构建产物选入口** —— 有 `web/dist` 走 `run.py`,没有则退回 `server.py`;CI 的测试 job 不构建前端 → 给 server.py 传了它不认识的参数 → argparse `exit(2)` → 进程当场死 → 「服务进程活着」「health 接口可用」必红。**本地为什么一直绿**:工作区里有 dist,永远走 run.py 那条 —— 典型的"测试只跑到本地恰好存在的那条分支"。**修法**:① 启动参数按入口构造(`--no-browser` 只在 run.py 分支加);② 进程已退出时打印 **exit code**,把"参数不认"与"采集层崩溃"分开;③ 文档串写明两条路都要过。**顺带补住真实缺口**:`release.yml` 的 exe job 在 `npm run build` **之后**补跑同一条测试 —— 那里 dist 已构建,测试走 `run.py` = **exe 的入口**(只放在 tests job 里永远只能测到 server.py,等于没覆盖用户双击那条路)。**版本号同步点(只有两处)**:`server.py` 的 `VERSION`(`/api/meta` 暴露)与 `README.md` 顶部徽章 —— 打包配置里没有版本元数据。**tag 处理**:首推的 v1.0.2 指向 `84a0203`(失败、零资产)→ 删远端 tag、重建指向 `25aa643`(修复提交)重推 → release 三 job 全绿;**资产** = `-windows.zip` 2.8 MB / `-win64-exe.zip` 16.56 MB + 两个 sha256。**交付前验收(下载发布资产实测,不是本地重打)**:下载 exe 包 → sha256 与资产一致(`2ddbb36378ff…138eaf`)→ 解压后放**坏的 `wpcap.dll`**(等价"没装 Npcap")实跑:`/api/meta` = `1.0.2`、`/api/health` = `degraded` 且 error 提到 Npcap、首页 **HTTP 200 且是真 HTML**、进程全程存活。**提交**:`84a0203`(版本号同步)+ `25aa643`(测试按入口给参数),均已 push。
   - **第十二轮(09-23,首启引导:把"要装驱动"从一句横幅变成能走通的三步)**:朋友反馈「看来还是要依赖」—— **定性是对的**(抓包驱动本身去不掉,见文末核查),但体验不该像甩锅:原先只有一条红横幅「采集层未启用:…」,现在缺驱动时页面出现**引导块**(`.guide`)—— 讲清缺什么(Npcap / 抓包驱动)+ **三步**(去官网装、不必重启电脑或程序、回来点按钮)+ 官网下载链接 + 「我已装好,重新检测」按钮。**关键实现**:`POST /api/capture/retry` —— 装完驱动**免重启程序**即可采上。成立的原因:`Capturer.pcap` 是**懒加载属性**,加载失败不会缓存异常,下次访问会重新 `WinDLL("wpcap.dll")`;端点先 `capturer.stop()` 清掉半启动状态再 `start()`,已在采集则直接回 `already`(判据是新增的 `Capturer.is_capturing()` = 抓包线程存活,不是看 `device_name` —— 句柄静默失效时它还在)。失败也绝不让服务不可用(异常照旧落到 `capturer.error`)。**前端**:新增 `web/src/components/CaptureGuide.tsx`;App 仅在 error 命中 `wpcap|Npcap` 时用它,其他采集错误仍走原横幅;health 轮询抽成 `useCallback` 的 `loadHealth`,重试成功后**先让成功提示显示 900ms 再刷新** —— 否则 React 18 会把 `setResult` 与父组件 `setHealth` 批进同一次渲染,引导块当场卸载、提示一闪都没有(**本轮真踩到的坑**)。**测试**:`test_no_npcap.py` 加第 5 条契约 —— 没驱动时重试必须如实回 `ok=false` 且**进程还活着**(两端都验:无 dist 走 `server.py` 10 项、有 dist 走 `run.py` 12 项,全绿)。**端到端验收**(`_deploy/_qa/qa_capture_guide.py`,开关式注入模拟"先没驱动、后装上"):浏览器里走完整条用户路径 **10/10** —— 引导块出现 / 三步文案 / 下载链接正确 / 点重试如实报失败 / 放开开关再点 → 引导块**自动消失**、顶栏「抓包设备」从"未启用采集"变成 `NPF_4FC5DA1D`、数据开始流动(整页截图 `capture_guide_blocked.png` / `capture_guide_ok.png`)。**顺带核实(回答"能不能不依赖 Npcap")**:驱动的角色**去不掉**(Windows 上拿包必须走驱动,Wireshark 同理);存在一条**纯 ETW 降级档**的真路但代价不小 —— `etw.py` 已在消费 `Microsoft-Windows-Kernel-Network`(事件带 `PID + size + 远端地址/端口`,不需第三方驱动、需管理员),缺的是**域名**(现在域名来自包内容:DNS 应答 + TLS SNI;要改用系统 `Microsoft-Windows-DNS-Client` 取 name→IP,精度与覆盖必然退化);而且 `collector.start()` 里 `pick_devices()`(需 pcap)排在 `etw.start()` **之前** → 没驱动时 ETW 根本不会启动,要重排启动顺序 + 重做证据口径与测试。**已登记在 README《已知成本与待优化》表里当候选,本轮不做**。**同日后续(用户选 A)**:引导里的下载按钮从官网页改成**当前版本安装包直链**(`https://npcap.com/dist/npcap-1.89.exe`,实测 HTTP 200 / 1.26 MB;版本号取自首页 `property="softwareVersion"`),步骤里补了"Windows 会要一次管理员授权";官网页降为**次级链接**(换版本/直链失效时用)。README 补**许可说明**(核对官网原文):免费版**不得随包再分发**(`may be used (but not externally distributed)`)、**限 5 台**、**静默安装属 OEM 商业版功能** —— 三条合起来解释"无感自动安装"不存在(许可与商业限制,非技术限制);B 方案(代下载 + `runas` 拉起安装器)用户明确不做。
-
-## 8. 决策记录：告警规则与界面入口（2026-10-16）
-
-把「告警规则引擎」与「单端口界面」两条线收尾进仓(提交 `927c406` + `c51decd`)。本节记录**关键决策与被否方案**——
-维护时请优先尊重这里的取舍理由;要推翻某条,先读完它为什么被这么定。
-
-### 8.1 界面入口:由「第二个服务」改为「8788 同源挂载」
-
-- **需求**:一个「随时打开界面」的日常入口。
-- **被否方案 A(已做出后被否)**:入口拉起 `run.py --port 8791`(第二份服务 + 第二份采集器 + 新浏览器窗口)。
-  **否决原因**:在内存紧张的机器上(实测可用仅 2.5 GB / 7.9%)打开即引发系统卡顿——「零新增进程」是这类
-  机器的硬约束;库写入虽然是 `ON CONFLICT DO UPDATE`(覆盖语义、不会翻倍),也救不了服务+采集双份的常驻成本。
-- **被否方案 B**:轻量静态服务器托管 `web/dist`。**否决原因**:单端口构建的 API 基址是同源 `/`,
-  静态服务无法提供 `/api`,前端整页 404。
-- **定案**:`server.py` 在 `web/dist/index.html` 存在时**同源挂载**(挂在所有 `/api` 路由之后,不会遮蔽 API)
-  → **常驻的 8788 本身就是界面**。桌面入口只做两件事:8788 在跑 → 秒开浏览器(零新增);没跑 → 最小化拉起再开。
-- **对开源用户同样成立**:默认构建(`VITE_API_BASE=/`)与开发构建(前端指向 127.0.0.1:8788)在 8788 上请求的
-  都是同源 `/api`。8791(run.py)作为一键包/演示包入口**不变**。
-
-### 8.2 告警种子规则:由「代理进程列表」改为「% 全机兜底」
-
-- **原设计**:默认规则以代理内核的进程名匹配(sentinel 的等价保护)。
-- **改因**:① **品牌边界**——开源产品的 UI 文案 / 默认配置 / 示例数据一律按对外材料处理,不点名任何具体
-  客户端(含同类内核名);② 事故形态的本质是「大流量上行」,与是不是代理无关;③ 对开源用户开箱即用。
-- **定案**:「大流量上传(通用保护)」进程匹配 `%`(所有进程) · 60 min 上行 ≥ 10 GB(或 30 min ≥ 5 GB) · 默认开;
-  「持续传输提醒(全机)」`%` · 连续 ≥ 60 min · **默认关**(常开代理/网盘的机器会周期性触发)。
-- **取舍(明示)**:失去「精确只盯代理」的针对性——个性化需求走面板(一键模板 + 从最近进程点选,同批交付)。
-- **边界(易踩)**:种子**只在规则文件「无规则」时**种入;手动清空 `rules` 数组**不会**重种(要重启后端)。
-  **测试残留规则会占位挡住种子**(10-16 实例:一条测试规则挡了两天,且一直在被评估)。
-
-### 8.3 告警面板降门槛:模板 + 点选(纯前端)
-
-- **动机**:原表单对非技术用户门槛高(要会 LIKE 通配、要懂流量概念、要自己选阈值)。
-- **定案**:一键模板(大流量上传 / 大流量下载 / 持续传输)+ 进程点选(`/api/history/top` 近 24h 有流量的进程,
-  点击即填)+ 术语通俗化;**不动后端**。
-- **有意未做**:多步向导;模板只覆盖最高频的三类。
-
-### 8.4 品牌清洗的范围与验证口径
-
-- 清洗落点:`alert_rules.py`(种子 + 文档串)、`AlertRulesPanel.tsx`(占位符)、`tests/test_alert_rules.py`(夹具)、
-  `scripts/proxy_sentinel.py`(退役时一并泛化;**历史提交里的具名不动**)。
-- **验证口径:打在构建产物上**(`dist/assets/*.js` 扫描 0 命中),不只扫源码。
-  清洗脚本 `_deploy/flowwatch/cleanup_brand.py`(可重跑、带自检)。
-
-### 8.5 提交范围:功能组 + 排除本机产物
-
-- 前端面板与后端引擎互相引用,**不可拆半提交**(只提前端会让仓库处于引用不存在后端的状态)。
-- 不入仓:`resident.cmd`(autostart.py 生成、含本机路径)、`alert_rules.json`(运行时数据)→ 已进 `.gitignore`;
-  一次性诊断脚本(`diagnose_*` / `find_chatgpt*` 等)留本地。
-- 过程记录:远端已有 README 提交 → `pull --rebase` 后推送(无冲突)。
-
-### 8.6 未采纳 / 可选项(登记)
-
-- `alert_rules._save` 改「临时文件 + `os.replace`」原子写(现状直接 write_text;小文件低频写,风险低)。
-- 种子规则的「首启引导」形态(首启提示为用户自选进程建规则)——未做;模板 + 点选已覆盖大部分需求。

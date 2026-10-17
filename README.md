@@ -731,6 +731,27 @@ wpcap），装 LangGraph 会拖进 httpx 一整棵依赖树，对本机小工具
 不配也能跑：面板会提示未配置，演示包默认 `mock` —— 链路（工具调用 + 记忆写入）照样走一遍，
 输出里明确标注 mock 模式，不会假装那是模型回答。
 
+## 交给 Agent：只读 HTTP 接口
+
+面板里的「流量助手」是给**人**用的问答入口；对**外部 Agent**（任何能跑命令或发请求的自动化），这套服务同时是一组只读 HTTP 接口——全部落在本机回环 `127.0.0.1:8788`，返回 JSON：
+
+| 接口 | 给什么 |
+|---|---|
+| `GET /api/health` · `/api/meta` | 服务是否活着、采集层状态与元信息 |
+| `GET /api/rates` | 当前窗口的进程速率快照（发送/接收、包数、主要对端） |
+| `GET /api/stream` | 同一份快照的 SSE 流式推送 |
+| `GET /api/history/process` · `/top` · `/timeline` · `/domains` | 历史层的分钟桶聚合：某进程 / 某域名 / 某区间的曲线与峰值 |
+| `GET /api/events` | 派生事件（进程出现 / 消失 / 尖峰） |
+| `GET /api/assistant/status` | 助手的分级规则与 12 个工具清单——**给 Agent 看"这里能问什么、什么被挡在门外"** |
+
+```powershell
+# 最小示例：先看服务活着没，再取当前速率快照
+(Invoke-WebRequest -UseBasicParsing http://127.0.0.1:8788/api/health).Content
+(Invoke-WebRequest -UseBasicParsing http://127.0.0.1:8788/api/rates).Content | ConvertFrom-Json
+```
+
+三条边界：① **只读**——没有写监控状态的接口（Agent 停不了采集、改不了规则）；② 只监听本机回环，不对外；③ 明细档（对端 IP / 端口）在助手的聚合档下**压根不注入**给模型；走 HTTP 直连时，要不要读 `peer` 字段由调用方自己决定（同一条纪律：读得到，不等于该往外发）。
+
 ## 复现与验证（脚本都在仓库里）
 
 README 里的每个数字都有对应脚本，**不需要 pytest、不需要网络**（前三个连抓包设备都不需要）：

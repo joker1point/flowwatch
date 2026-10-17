@@ -54,7 +54,7 @@ logger = logging.getLogger("flowwatch.server")
 # （采集/历史/告警守护的死因全部不可考，E-24 同款）。uvicorn 自己的日志不受影响。
 logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(name)s: %(message)s")
 
-VERSION = "1.0.3"           # 对外版本（/api/meta 暴露；发版时与 git tag 一起改）
+VERSION = "1.1.0"           # 对外版本（/api/meta 暴露；发版时与 git tag 一起改）
 HOST = "127.0.0.1"
 PORT = 8788
 # 与项目（或 exe）同目录，便于连同库一起备份；打包成 exe 时落在 exe 旁边（见 datadir.py）

@@ -83,3 +83,7 @@ resident.cmd
 
 # alert rules runtime data (seeded on first run; may include local process names)
 alert_rules.json
+
+# 本机专属诊断：分流前后对比工具里含代理进程名过滤元组（对外材料红线），只留本地
+# （同一条纪律见 docs/handoff/flowwatch.md）
+scripts/proxy_split_baseline.py

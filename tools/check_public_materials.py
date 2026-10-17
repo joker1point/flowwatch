@@ -1,8 +1,12 @@
 #!/usr/bin/env python3
-"""对外材料红线扫描（2026-10-16）：代理软件品牌名 + 敏感凭据。
+"""对外材料红线扫描（2026-10-16，2026-10-17 补本机路径）：代理软件品牌名 + 敏感凭据 + 个人路径。
 
-依据：工作区规则「对外材料不出现 FLCLASH」—— 代理软件名不进公开材料 / 公开仓
-（README、UI 文案、源码注释、测试夹具都算），提及时泛化为「某代理进程」。
+依据：
+1. 工作区规则「对外材料不出现 FLCLASH」—— 代理软件名不进公开材料 / 公开仓
+   （README、UI 文案、源码注释、测试夹具都算），提及时泛化为「某代理进程」。
+2. 「公开仓不留本机隐私」—— 2026-10-17 八仓体检发现 ExeTrace / techlog /
+   agent-skill-framework 三仓的 `C:\\Users\\biren\\...` 个人路径全部漏过闸门判 PASS，
+   公开仓批量躺着作者用户名 + 目录结构。故补 PATH_HARD 这一类硬红线。
 
 用法：
     python check_public_materials.py [<仓库根>]      # 默认当前目录
@@ -32,6 +36,19 @@ BRAND_HARD = ["flclash", "mihomo", "clash"]
 
 # 代理 / 机场相关（只警告）——出现在说明性文字里可能是有意保留
 BRAND_WARN = ["hysteria", "v2ray", "xray", "sing-box", "trojan", "vmess", "shadowsocks", "机场"]
+
+# 本机个人路径（硬红线）：作者真实家用目录 / 工作目录不得进入公开仓。
+# 只拦「作者本人的」具体路径（biren / WorkBuddy），不拦通用示例占位符
+# （`C:\\Users\\<你的用户名>`、`$HOME`、`%USERPROFILE%`）—— 后者是文档该写的形态。
+PATH_HARD = [
+    r"[A-Za-z]:[\\/]+Users[\\/]+biren\b",   # C:\Users\biren / c:/Users/biren
+    r"/Users/biren\b",                      # macOS
+    r"/home/biren\b",                       # Linux
+]
+
+# 本机工作目录名（只警告）：WorkBuddy 是通用工具目录名、不构成身份泄漏，
+# 但它出现在"默认扫描路径"这类产品默认值里时值得人工过目。
+PATH_WARN = [r"\bWorkBuddy\b"]
 
 # 高置信凭据（硬红线）
 SECRET_HARD = [
@@ -104,6 +121,8 @@ def scan(root: Path) -> int:
     warn_pat = [(t, re.compile(re.escape(t), re.I)) for t in BRAND_WARN]
     sec_hard = [re.compile(p) for p in SECRET_HARD]
     sec_warn = [re.compile(p) for p in SECRET_WARN]
+    path_hard = [re.compile(p, re.I) for p in PATH_HARD]
+    path_warn = [re.compile(p, re.I) for p in PATH_WARN]
 
     n_files = 0
     for p in sorted(tracked_files(root)):
@@ -127,6 +146,15 @@ def scan(root: Path) -> int:
                 if rx.search(line):
                     warn_hits.append(f"::warning file={rel},line={i}::疑似代理相关词「{term}」"
                                      f"（如非有意保留，建议泛化）：{line.strip()[:120]}")
+            for rx in path_hard:
+                if rx.search(line):
+                    hard_hits.append(f"::error file={rel},line={i}::本机个人路径不得进入公开仓"
+                                     f"（{rx.pattern}）——改用 `%USERPROFILE%` / `Path.home()` / 占位符；"
+                                     f"确需保留写 `public-materials: ignore` 并注明理由：{line.strip()[:100]}")
+            for rx in path_warn:
+                if rx.search(line):
+                    warn_hits.append(f"::warning file={rel},line={i}::疑似本机工作目录名"
+                                     f"（{rx.pattern}）——如非产品默认值建议泛化：{line.strip()[:100]}")
             for rx in sec_hard:
                 if rx.search(line):
                     hard_hits.append(f"::error file={rel},line={i}::疑似凭据泄漏"

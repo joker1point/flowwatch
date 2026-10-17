@@ -1,7 +1,7 @@
 # flowwatch
 
 ![ci](https://github.com/joker1point/flowwatch/actions/workflows/ci.yml/badge.svg)
-![version](https://img.shields.io/badge/version-1.0.3-blue)
+![version](https://img.shields.io/badge/version-1.1.0-blue)
 ![license](https://img.shields.io/badge/license-MIT-green)
 
 **📖 项目介绍与完整说明（飞书文档 · 公网可读）**：https://my.feishu.cn/docx/QW0hdFJ78o6z1VxdK1rcmJwbnqf
